@@ -194,6 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         EnterAlternateScreen,
                         EnableMouseCapture
                     )?;
+                    terminal.clear()?;
 
                     app.selected_packages.clear();
 
@@ -255,6 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         EnterAlternateScreen,
                         EnableMouseCapture
                     )?;
+                    terminal.clear()?;
 
                     let tx_refresh = tx.clone();
                     tokio::spawn(async move {
