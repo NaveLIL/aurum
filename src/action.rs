@@ -18,8 +18,12 @@ pub enum Action {
     Error(String),
     Key(crossterm::event::KeyEvent),
     ScanPackage(String),
+    ViewPkgbuild(String),
+    SetPkgbuildLines(Vec<ratatui::text::Line<'static>>),
     // New: Package operations
     InstallPackages(Vec<String>),
+    RemovePackages(Vec<String>),
+    SetOrphans(Vec<Package>),
     ToggleSelect(String),
     UpdateAll,
     UpdateSingle(String),

@@ -66,6 +66,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => tx_load.send(Action::Error(format!("Failed to scan cache: {}", e))).ok(),
         };
 
+        // Load orphans
+        tx_load.send(Action::SetStatus("Checking for orphans...".to_string())).ok();
+        match backend::paru::Paru::get_orphans().await {
+            Ok(orphans) => tx_load.send(Action::SetOrphans(orphans)).ok(),
+            Err(e) => tx_load.send(Action::Error(format!("Failed to check orphans: {}", e))).ok(),
+        };
+
         tx_load.send(Action::SetStatus("Ready".to_string())).ok();
     });
 
@@ -133,6 +140,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Action::SetCacheEntries(entries) => {
                     app.cache_entries = entries;
                 }
+                Action::SetOrphans(orphans) => {
+                    app.orphans = orphans;
+                }
                 Action::SetPackageInfo(pkg) => {
                     app.selected_package = Some(pkg);
                     app.is_loading = false;
@@ -161,6 +171,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.route = app::Route::Scanner;
                     app.tab_index = 6;
                     app.status_message = Some("✅ Scan complete.".to_string());
+                }
+                Action::ViewPkgbuild(pkg_name) => {
+                    let tx_view = tx.clone();
+                    app.status_message = Some(format!("Fetching PKGBUILD for {}...", pkg_name));
+                    app.is_loading = true;
+                    tokio::spawn(async move {
+                        match backend::paru::Paru::get_pkgbuild(&pkg_name).await {
+                            Ok(content) => {
+                                let lines = backend::highlight::highlight_pkgbuild(&content);
+                                tx_view.send(Action::SetPkgbuildLines(lines)).ok();
+                            }
+                            Err(e) => {
+                                tx_view.send(Action::Error(format!("Failed to get PKGBUILD: {}", e))).ok();
+                            }
+                        }
+                    });
+                }
+                Action::SetPkgbuildLines(lines) => {
+                    app.is_loading = false;
+                    app.pkgbuild_lines = lines;
+                    app.pkgbuild_scroll = 0;
+                    app.route = app::Route::DiffViewer;
+                    app.status_message = Some("PKGBUILD loaded.".to_string());
                 }
                 // Package installation — suspend TUI and run paru
                 Action::InstallPackages(pkg_names) => {
@@ -221,6 +254,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         if let Ok(updates) = backend::paru::Paru::get_updates().await {
                             tx_refresh.send(Action::SetUpdates(updates)).ok();
+                        }
+                        if let Ok(orphans) = backend::paru::Paru::get_orphans().await {
+                            tx_refresh.send(Action::SetOrphans(orphans)).ok();
+                        }
+                        tx_refresh.send(Action::SetStatus("Ready".to_string())).ok();
+                    });
+                }
+                Action::RemovePackages(pkg_names) => {
+                    if pkg_names.is_empty() {
+                        continue;
+                    }
+                    input_active.store(false, Ordering::Relaxed);
+
+                    // Restore terminal before running paru
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    let pkgs_str = pkg_names.join(" ");
+                    println!("\n>>> paru -Rns {}\n", pkgs_str);
+                    let status = std::process::Command::new("paru")
+                        .arg("-Rns")
+                        .args(&pkg_names)
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Removal complete. Press Enter to return...");
+                        }
+                        Ok(s) => {
+                            println!("\n⚠ paru exited with code: {}. Press Enter to return...", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run paru: {}. Press Enter to return...", e);
+                        }
+                    }
+
+                    // Wait for Enter
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    // Re-enter TUI
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    app.selected_packages.clear();
+                    input_active.store(true, Ordering::Relaxed);
+
+                    // Refresh data
+                    let tx_refresh = tx.clone();
+                    tokio::spawn(async move {
+                        tx_refresh.send(Action::SetStatus("Refreshing...".to_string())).ok();
+                        if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
+                            tx_refresh.send(Action::SetInstalled(pkgs)).ok();
+                        }
+                        if let Ok(updates) = backend::paru::Paru::get_updates().await {
+                            tx_refresh.send(Action::SetUpdates(updates)).ok();
+                        }
+                        if let Ok(orphans) = backend::paru::Paru::get_orphans().await {
+                            tx_refresh.send(Action::SetOrphans(orphans)).ok();
                         }
                         tx_refresh.send(Action::SetStatus("Ready".to_string())).ok();
                     });
@@ -342,8 +443,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // Key handling
                 Action::Key(key) => {
-                    // If confirm dialog is open, only handle y/n
-                    if app.confirm_dialog.is_some() {
+                    if app.route == app::Route::DiffViewer {
+                        match key.code {
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                if app.pkgbuild_scroll + 1 < app.pkgbuild_lines.len() {
+                                    app.pkgbuild_scroll += 1;
+                                }
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                if app.pkgbuild_scroll > 0 {
+                                    app.pkgbuild_scroll -= 1;
+                                }
+                            }
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.route = app::App::tab_route(app.tab_index);
+                            }
+                            _ => {}
+                        }
+                    } else if app.confirm_dialog.is_some() {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
                                 tx.send(Action::ConfirmYes).ok();
@@ -360,10 +477,100 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.running = false;
                                 }
                                 KeyCode::Char('j') | KeyCode::Down => {
-                                    app.select_next();
+                                    if app.route == app::Route::Store {
+                                        if app.store_active_pane == 0 {
+                                            let cat_count = backend::store::get_categories().len();
+                                            if cat_count > 0 {
+                                                app.store_category_index = (app.store_category_index + 1) % cat_count;
+                                                app.store_app_index = 0;
+                                            }
+                                        } else {
+                                            let current_cat = backend::store::get_categories()[app.store_category_index];
+                                            let apps_count = backend::store::get_apps_by_category(current_cat).len();
+                                            if apps_count > 0 {
+                                                app.store_app_index = (app.store_app_index + 1) % apps_count;
+                                            }
+                                        }
+                                    } else if app.route == app::Route::Cache {
+                                        if app.cache_active_pane == 0 {
+                                            app.select_next();
+                                        } else {
+                                            let len = app.orphans.len();
+                                            if len > 0 {
+                                                let i = match app.orphans_list_state.selected() {
+                                                    Some(i) => if i >= len - 1 { 0 } else { i + 1 },
+                                                    None => 0,
+                                                };
+                                                app.orphans_list_state.select(Some(i));
+                                            }
+                                        }
+                                    } else {
+                                        app.select_next();
+                                    }
                                 }
                                 KeyCode::Char('k') | KeyCode::Up => {
-                                    app.select_previous();
+                                    if app.route == app::Route::Store {
+                                        if app.store_active_pane == 0 {
+                                            let cat_count = backend::store::get_categories().len();
+                                            if cat_count > 0 {
+                                                if app.store_category_index > 0 {
+                                                    app.store_category_index -= 1;
+                                                } else {
+                                                    app.store_category_index = cat_count - 1;
+                                                }
+                                                app.store_app_index = 0;
+                                            }
+                                        } else {
+                                            let current_cat = backend::store::get_categories()[app.store_category_index];
+                                            let apps_count = backend::store::get_apps_by_category(current_cat).len();
+                                            if apps_count > 0 {
+                                                if app.store_app_index > 0 {
+                                                    app.store_app_index -= 1;
+                                                } else {
+                                                    app.store_app_index = apps_count - 1;
+                                                }
+                                            }
+                                        }
+                                    } else if app.route == app::Route::Cache {
+                                        if app.cache_active_pane == 0 {
+                                            app.select_previous();
+                                        } else {
+                                            let len = app.orphans.len();
+                                            if len > 0 {
+                                                let i = match app.orphans_list_state.selected() {
+                                                    Some(i) => if i == 0 { len - 1 } else { i - 1 },
+                                                    None => 0,
+                                                };
+                                                app.orphans_list_state.select(Some(i));
+                                            }
+                                        }
+                                    } else {
+                                        app.select_previous();
+                                    }
+                                }
+                                KeyCode::Char('h') | KeyCode::Left => {
+                                    if app.route == app::Route::Store {
+                                        app.store_active_pane = 0;
+                                    } else if app.route == app::Route::Cache {
+                                        app.cache_active_pane = 0;
+                                    }
+                                }
+                                KeyCode::Char('l') | KeyCode::Right => {
+                                    if app.route == app::Route::Store {
+                                        let current_cat = backend::store::get_categories()[app.store_category_index];
+                                        let apps_count = backend::store::get_apps_by_category(current_cat).len();
+                                        if apps_count > 0 {
+                                            app.store_active_pane = 1;
+                                        }
+                                    } else if app.route == app::Route::Cache {
+                                        let orphans_count = app.orphans.len();
+                                        if orphans_count > 0 {
+                                            app.cache_active_pane = 1;
+                                            if app.orphans_list_state.selected().is_none() {
+                                                app.orphans_list_state.select(Some(0));
+                                            }
+                                        }
+                                    }
                                 }
                                 KeyCode::Tab => app.next_tab(),
                                 KeyCode::BackTab => app.previous_tab(),
@@ -382,6 +589,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         app::Route::Search => {
                                             app.list_state.selected()
                                                 .and_then(|i| app.search_results.get(i).map(|p| p.name.clone()))
+                                        }
+                                        app::Route::Store => {
+                                            if app.store_active_pane == 1 {
+                                                let current_cat = backend::store::get_categories()[app.store_category_index];
+                                                let apps = backend::store::get_apps_by_category(current_cat);
+                                                apps.get(app.store_app_index).map(|a| a.name.to_string())
+                                            } else {
+                                                None
+                                            }
                                         }
                                         _ => None,
                                     };
@@ -410,7 +626,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         tx.send(Action::ScanPackage(name)).ok();
                                     }
                                 }
-                                // Install selected package(s) (Enter in Updates/Search)
+                                // View PKGBUILD
+                                KeyCode::Char('v') => {
+                                    let pkg_name = match app.route {
+                                        app::Route::Updates => {
+                                            app.list_state.selected()
+                                                .and_then(|i| app.updates.get(i).map(|u| u.name.clone()))
+                                        }
+                                        app::Route::Search => {
+                                            app.list_state.selected()
+                                                .and_then(|i| app.search_results.get(i).map(|p| p.name.clone()))
+                                        }
+                                        app::Route::Installed => {
+                                            app.list_state.selected()
+                                                .and_then(|i| app.installed_packages.get(i).map(|p| p.name.clone()))
+                                        }
+                                        app::Route::Store => {
+                                            if app.store_active_pane == 1 {
+                                                let current_cat = backend::store::get_categories()[app.store_category_index];
+                                                let apps = backend::store::get_apps_by_category(current_cat);
+                                                apps.get(app.store_app_index).map(|a| a.name.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(name) = pkg_name {
+                                        tx.send(Action::ViewPkgbuild(name)).ok();
+                                    }
+                                }
+                                // Install selected package(s) (Enter in Updates/Search/Store)
                                 KeyCode::Enter => {
                                     if !app.selected_packages.is_empty() {
                                         let selected: Vec<String> = app.selected_packages.iter().cloned().collect();
@@ -441,6 +687,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             Box::new(Action::InstallPackages(vec![name])),
                                                         )).ok();
                                                     }
+                                                }
+                                            }
+                                            app::Route::Store => {
+                                                let current_cat = backend::store::get_categories()[app.store_category_index];
+                                                let apps = backend::store::get_apps_by_category(current_cat);
+                                                if let Some(a) = apps.get(app.store_app_index) {
+                                                    let name = a.name.to_string();
+                                                    tx.send(Action::ShowConfirm(
+                                                        format!("Install '{}'?", name),
+                                                        Box::new(Action::InstallPackages(vec![name])),
+                                                    )).ok();
                                                 }
                                             }
                                             app::Route::Installed => {
@@ -488,27 +745,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )).ok();
                                     }
                                 }
-                                // Cache: delete selected
+                                // Cache: delete selected / remove selected orphan package
                                 KeyCode::Char('d') => {
                                     if app.route == app::Route::Cache {
-                                        if let Some(i) = app.list_state.selected() {
-                                            if let Some(c) = app.cache_entries.get(i) {
-                                                let name = c.name.clone();
-                                                tx.send(Action::ShowConfirm(
-                                                    format!("Delete cache for '{}'?", name),
-                                                    Box::new(Action::CleanCache(name)),
-                                                )).ok();
+                                        if app.cache_active_pane == 0 {
+                                            if let Some(i) = app.list_state.selected() {
+                                                if let Some(c) = app.cache_entries.get(i) {
+                                                    let name = c.name.clone();
+                                                    tx.send(Action::ShowConfirm(
+                                                        format!("Delete cache for '{}'?", name),
+                                                        Box::new(Action::CleanCache(name)),
+                                                    )).ok();
+                                                }
+                                            }
+                                        } else {
+                                            if let Some(i) = app.orphans_list_state.selected() {
+                                                if let Some(pkg) = app.orphans.get(i) {
+                                                    let name = pkg.name.clone();
+                                                    tx.send(Action::ShowConfirm(
+                                                        format!("Remove orphan package '{}'?", name),
+                                                        Box::new(Action::RemovePackages(vec![name])),
+                                                    )).ok();
+                                                }
                                             }
                                         }
                                     }
                                 }
-                                // Cache: delete all
+                                // Cache: delete all cache / clean all orphans
                                 KeyCode::Char('D') => {
-                                    if app.route == app::Route::Cache && !app.cache_entries.is_empty() {
-                                        tx.send(Action::ShowConfirm(
-                                            "Delete ALL cache entries?".to_string(),
-                                            Box::new(Action::CleanAllCache),
-                                        )).ok();
+                                    if app.route == app::Route::Cache {
+                                        if app.cache_active_pane == 0 {
+                                            if !app.cache_entries.is_empty() {
+                                                tx.send(Action::ShowConfirm(
+                                                    "Delete ALL cache entries?".to_string(),
+                                                    Box::new(Action::CleanAllCache),
+                                                )).ok();
+                                            }
+                                        } else {
+                                            if !app.orphans.is_empty() {
+                                                let names: Vec<String> = app.orphans.iter().map(|o| o.name.clone()).collect();
+                                                tx.send(Action::ShowConfirm(
+                                                    format!("Remove ALL {} orphan packages?", names.len()),
+                                                    Box::new(Action::RemovePackages(names)),
+                                                )).ok();
+                                            }
+                                        }
                                     }
                                 }
                                 _ => {}

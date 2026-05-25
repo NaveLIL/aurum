@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Line},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap, ListState},
     Frame,
 };
 use crate::app::{App, Route, InputMode};
@@ -29,7 +29,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
-    let tab_names = vec!["Dashboard", "Updates", "Installed", "Search", "News", "Cache", "Scanner"];
+    let tab_names = vec!["Dashboard", "Updates", "Installed", "Search", "Store", "News", "Cache", "Scanner"];
     let titles: Vec<Line> = tab_names
         .iter()
         .map(|t| {
@@ -68,9 +68,11 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         Route::Updates => draw_updates(f, app, area),
         Route::Installed => draw_installed(f, app, area),
         Route::Search => draw_search(f, app, area),
+        Route::Store => draw_store(f, app, area),
         Route::News => draw_news(f, app, area),
         Route::Cache => draw_cache(f, app, area),
         Route::Scanner => draw_scanner(f, app, area),
+        Route::DiffViewer => draw_pkgbuild_viewer(f, app, area),
         _ => draw_placeholder(f, area),
     }
 }
@@ -533,6 +535,18 @@ fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    // Left pane: Cache Manager
+    let cache_border_style = if app.cache_active_pane == 0 {
+        Style::default().fg(Color::Rgb(255, 200, 80))
+    } else {
+        Style::default().fg(Color::Rgb(60, 60, 80))
+    };
+
     if app.cache_entries.is_empty() {
         let msg = if app.is_loading {
             format!("  {} Scanning cache...", app.spinner_char())
@@ -543,59 +557,160 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(cache_border_style)
                     .title(Span::styled(" 🧹 Cache Manager ", Style::default().fg(Color::Rgb(255, 200, 100)))),
             )
             .style(Style::default().fg(Color::Rgb(140, 140, 160)));
-        f.render_widget(paragraph, area);
-        return;
+        f.render_widget(paragraph, chunks[0]);
+    } else {
+        let total_size: u64 = app.cache_entries.iter().map(|c| c.size_bytes).sum();
+        let items: Vec<ListItem> = app
+            .cache_entries
+            .iter()
+            .map(|c| {
+                let content = vec![Line::from(vec![
+                    Span::styled(
+                        format!("{:<25}", c.name),
+                        Style::default()
+                            .fg(Color::Rgb(255, 200, 100))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{:>10}", format_size(c.size_bytes)),
+                        Style::default().fg(Color::Rgb(180, 180, 200)),
+                    ),
+                ])];
+                ListItem::new(content)
+            })
+            .collect();
+
+        let title = format!(
+            " 🧹 Cache ({} entries, {}) ",
+            app.cache_entries.len(),
+            format_size(total_size)
+        );
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(cache_border_style)
+                    .title(Span::styled(title, Style::default().fg(Color::Rgb(255, 200, 100)))),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(40, 45, 60))
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▸ ");
+
+        let mut list_state = app.list_state.clone();
+        if app.cache_active_pane != 0 {
+            list_state.select(None);
+        }
+        f.render_stateful_widget(list, chunks[0], &mut list_state);
     }
 
-    let total_size: u64 = app.cache_entries.iter().map(|c| c.size_bytes).sum();
+    // Right pane: Orphans cleaner
+    let orphans_border_style = if app.cache_active_pane == 1 {
+        Style::default().fg(Color::Rgb(255, 200, 80))
+    } else {
+        Style::default().fg(Color::Rgb(60, 60, 80))
+    };
 
-    let items: Vec<ListItem> = app
-        .cache_entries
-        .iter()
-        .map(|c| {
-            let content = vec![Line::from(vec![
-                Span::styled(
-                    format!("{:<30}", c.name),
-                    Style::default()
-                        .fg(Color::Rgb(255, 200, 100))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:>10}", format_size(c.size_bytes)),
-                    Style::default().fg(Color::Rgb(180, 180, 200)),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    &c.last_modified,
-                    Style::default().fg(Color::Rgb(140, 140, 160)),
-                ),
-            ])];
-            ListItem::new(content)
-        })
-        .collect();
+    let orphan_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .split(chunks[1]);
 
-    let title = format!(
-        " 🧹 Cache ({} entries, {}) — [d] Delete  [D] Clean All ",
-        app.cache_entries.len(),
-        format_size(total_size)
-    );
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(Color::Rgb(255, 200, 100)))),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(40, 45, 60))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▸ ");
+    if app.orphans.is_empty() {
+        let msg = if app.is_loading {
+            format!("  {} Checking for orphans...", app.spinner_char())
+        } else {
+            "  No orphan packages found. System is clean! ✨".to_string()
+        };
+        let paragraph = Paragraph::new(msg)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(orphans_border_style)
+                    .title(Span::styled(" 🍂 Orphan Dependencies ", Style::default().fg(Color::Rgb(255, 100, 100)))),
+            )
+            .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+        f.render_widget(paragraph, orphan_chunks[0]);
+    } else {
+        let items: Vec<ListItem> = app
+            .orphans
+            .iter()
+            .map(|pkg| {
+                let content = vec![Line::from(vec![
+                    Span::styled(
+                        format!("{:<25}", pkg.name),
+                        Style::default()
+                            .fg(Color::Rgb(255, 100, 100))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        &pkg.version,
+                        Style::default().fg(Color::Rgb(140, 140, 160)),
+                    ),
+                ])];
+                ListItem::new(content)
+            })
+            .collect();
 
-    f.render_stateful_widget(list, area, &mut app.list_state);
+        let title = format!(" 🍂 Orphans ({} packages) ", app.orphans.len());
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(orphans_border_style)
+                    .title(Span::styled(title, Style::default().fg(Color::Rgb(255, 100, 100)))),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(55, 40, 40))
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▸ ");
+
+        let mut orphans_state = app.orphans_list_state.clone();
+        if app.cache_active_pane != 1 {
+            orphans_state.select(None);
+        }
+        f.render_stateful_widget(list, orphan_chunks[0], &mut orphans_state);
+    }
+
+    // Help/actions bar for cache / orphans
+    let help_text = if app.cache_active_pane == 0 {
+        vec![
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Navigate Cache  "),
+            Span::styled(" [d] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Delete Selected  "),
+            Span::styled(" [D] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Clean All Cache  "),
+            Span::styled(" [l/→] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Switch to Orphans"),
+        ]
+    } else {
+        vec![
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Navigate Orphans  "),
+            Span::styled(" [d] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Remove Selected  "),
+            Span::styled(" [D] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Remove All Orphans  "),
+            Span::styled(" [h/←] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Switch to Cache"),
+        ]
+    };
+
+    let help_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+        .title(Span::styled(" Actions ", Style::default().fg(Color::Rgb(140, 140, 160))));
+    let help_para = Paragraph::new(Line::from(help_text)).block(help_block);
+    f.render_widget(help_para, orphan_chunks[1]);
 }
 
 fn draw_scanner(f: &mut Frame, app: &mut App, area: Rect) {
@@ -722,6 +837,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         Route::Updates => "Updates",
         Route::Installed => "Installed",
         Route::Search => "Search",
+        Route::Store => "Store",
         Route::News => "News",
         Route::Cache => "Cache",
         Route::Scanner => "Scanner",
@@ -791,4 +907,173 @@ fn draw_confirm_dialog(f: &mut Frame, app: &mut App) {
 
         f.render_widget(dialog, dialog_area);
     }
+}
+
+fn draw_pkgbuild_viewer(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " 📝 PKGBUILD Viewer ([j/↓] Down  [k/↑] Up  [Esc] Return) ",
+            Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default());
+
+    let paragraph = Paragraph::new(app.pkgbuild_lines.clone())
+        .block(block)
+        .scroll((app.pkgbuild_scroll as u16, 0));
+
+    f.render_widget(paragraph, area);
+}
+
+fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(area);
+
+    let categories = crate::backend::store::get_categories();
+
+    // Left pane: Categories
+    let category_border_style = if app.store_active_pane == 0 {
+        Style::default().fg(Color::Rgb(255, 200, 80))
+    } else {
+        Style::default().fg(Color::Rgb(60, 60, 80))
+    };
+
+    let category_items: Vec<ListItem> = categories
+        .iter()
+        .enumerate()
+        .map(|(i, cat)| {
+            let style = if i == app.store_category_index {
+                Style::default()
+                    .fg(Color::Rgb(255, 200, 80))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(180, 180, 200))
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("  {} ", if i == app.store_category_index { "→" } else { " " }), style),
+                Span::styled(*cat, style),
+            ]))
+        })
+        .collect();
+
+    let category_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(category_border_style)
+        .title(Span::styled(
+            " 📂 Categories ",
+            Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD),
+        ));
+
+    let category_list = List::new(category_items)
+        .block(category_block)
+        .highlight_style(Style::default().bg(Color::Rgb(40, 40, 55)));
+
+    let mut category_list_state = ListState::default();
+    category_list_state.select(Some(app.store_category_index));
+    f.render_stateful_widget(category_list, chunks[0], &mut category_list_state);
+
+    // Right pane: Apps in current category
+    let app_border_style = if app.store_active_pane == 1 {
+        Style::default().fg(Color::Rgb(255, 200, 80))
+    } else {
+        Style::default().fg(Color::Rgb(60, 60, 80))
+    };
+
+    let current_cat = categories[app.store_category_index];
+    let store_apps = crate::backend::store::get_apps_by_category(current_cat);
+
+    let app_items: Vec<ListItem> = store_apps
+        .iter()
+        .enumerate()
+        .map(|(i, store_app)| {
+            let is_selected = app.selected_packages.contains(store_app.name);
+            let select_marker = if is_selected {
+                Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
+            };
+
+            let is_installed = app.installed_packages.iter().any(|p| p.name == store_app.name);
+            let status_span = if is_installed {
+                Span::styled(" (Installed)", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::ITALIC))
+            } else {
+                Span::raw("")
+            };
+
+            let name_style = if i == app.store_app_index && app.store_active_pane == 1 {
+                Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD)
+            };
+
+            let content = vec![
+                Line::from(vec![
+                    select_marker,
+                    Span::styled(format!("{:<28}", store_app.name), name_style),
+                    status_span,
+                ]),
+                Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(store_app.description, Style::default().fg(Color::Rgb(140, 140, 160))),
+                ]),
+                Line::from(""), // spacing
+            ];
+            ListItem::new(content)
+        })
+        .collect();
+
+    let app_title = format!(" 📦 Applications in {} ", current_cat);
+    let app_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app_border_style)
+        .title(Span::styled(
+            app_title,
+            Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD),
+        ));
+
+    // Splitting the right pane into apps list and help/info bar
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .split(chunks[1]);
+
+    let app_list = List::new(app_items)
+        .block(app_block)
+        .highlight_style(Style::default().bg(Color::Rgb(40, 40, 55)));
+
+    let mut app_list_state = ListState::default();
+    app_list_state.select(Some(app.store_app_index));
+    f.render_stateful_widget(app_list, right_chunks[0], &mut app_list_state);
+
+    // Help/actions bar
+    let help_text = if app.store_active_pane == 0 {
+        vec![
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Navigate Categories  "),
+            Span::styled(" [l/→] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Go to Applications List"),
+        ]
+    } else {
+        vec![
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Navigate Apps  "),
+            Span::styled(" [Space] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Toggle Batch Selection  "),
+            Span::styled(" [v] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("View PKGBUILD  "),
+            Span::styled(" [Enter] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Install Selected  "),
+            Span::styled(" [h/←] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Back to Categories"),
+        ]
+    };
+
+    let help_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+        .title(Span::styled(" Actions ", Style::default().fg(Color::Rgb(140, 140, 160))));
+    let help_para = Paragraph::new(Line::from(help_text)).block(help_block);
+    f.render_widget(help_para, right_chunks[1]);
 }

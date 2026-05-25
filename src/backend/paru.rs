@@ -238,6 +238,42 @@ impl Paru {
         .await
         .context("spawn_blocking failed")?
     }
+
+    pub async fn get_orphans() -> Result<Vec<Package>> {
+        let output = Command::new("paru")
+            .arg("-Qdt")
+            .output()
+            .await
+            .context("Failed to execute paru -Qdt")?;
+
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8(output.stdout)?;
+        let mut packages = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                packages.push(Package {
+                    name: parts[0].to_string(),
+                    version: parts[1].to_string(),
+                    description: None,
+                    maintainer: None,
+                    url: None,
+                    votes: 0,
+                    popularity: 0.0,
+                    last_modified: 0,
+                    out_of_date: None,
+                    installed_version: Some(parts[1].to_string()),
+                    repository: "orphan".to_string(),
+                });
+            }
+        }
+
+        Ok(packages)
+    }
 }
 
 fn dir_size(path: &std::path::Path) -> Result<u64> {

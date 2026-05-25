@@ -10,6 +10,7 @@ pub enum Route {
     Updates,
     Installed,
     Search,
+    Store,
     News,
     Cache,
     Scanner,
@@ -39,7 +40,10 @@ pub struct App {
     pub scan_results: Vec<ScanResult>,
     pub news_items: Vec<NewsItem>,
     pub cache_entries: Vec<CacheEntry>,
+    pub orphans: Vec<Package>,
     pub selected_packages: std::collections::HashSet<String>,
+    pub pkgbuild_lines: Vec<ratatui::text::Line<'static>>,
+    pub pkgbuild_scroll: usize,
 
     // UI State
     pub list_state: ratatui::widgets::ListState,
@@ -47,6 +51,13 @@ pub struct App {
     pub tab_index: usize,
     pub cache_list_state: ratatui::widgets::ListState,
     pub news_list_state: ratatui::widgets::ListState,
+    pub orphans_list_state: ratatui::widgets::ListState,
+    pub cache_active_pane: usize, // 0 = cache, 1 = orphans
+
+    // Store State
+    pub store_category_index: usize,
+    pub store_app_index: usize,
+    pub store_active_pane: usize,
 
     // Status
     pub status_message: Option<String>,
@@ -58,7 +69,7 @@ pub struct App {
     pub confirm_dialog: Option<(String, Box<Action>)>,
 }
 
-const TAB_COUNT: usize = 7;
+const TAB_COUNT: usize = 8;
 
 impl App {
     pub fn new(config: Config) -> Self {
@@ -75,12 +86,20 @@ impl App {
             scan_results: Vec::new(),
             news_items: Vec::new(),
             cache_entries: Vec::new(),
+            orphans: Vec::new(),
             selected_packages: std::collections::HashSet::new(),
+            pkgbuild_lines: Vec::new(),
+            pkgbuild_scroll: 0,
             list_state: ratatui::widgets::ListState::default(),
             table_state: ratatui::widgets::TableState::default(),
             tab_index: 0,
             cache_list_state: ratatui::widgets::ListState::default(),
             news_list_state: ratatui::widgets::ListState::default(),
+            orphans_list_state: ratatui::widgets::ListState::default(),
+            cache_active_pane: 0,
+            store_category_index: 0,
+            store_app_index: 0,
+            store_active_pane: 0,
             status_message: None,
             is_loading: false,
             last_checked: None,
@@ -103,9 +122,10 @@ impl App {
             1 => Route::Updates,
             2 => Route::Installed,
             3 => Route::Search,
-            4 => Route::News,
-            5 => Route::Cache,
-            6 => Route::Scanner,
+            4 => Route::Store,
+            5 => Route::News,
+            6 => Route::Cache,
+            7 => Route::Scanner,
             _ => Route::Dashboard,
         }
     }
