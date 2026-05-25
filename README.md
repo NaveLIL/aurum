@@ -79,4 +79,4 @@ You can add custom regular expressions to `risky_patterns` to expand the static 
 
 ## License
 
-MIT / GPLv3. Choose whichever you prefer.
+MIT
