@@ -2,6 +2,7 @@ use tui_input::Input;
 use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry};
 use crate::config::Config;
 use crate::action::Action;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Route {
@@ -16,7 +17,6 @@ pub enum Route {
     Scanner,
     PackageDetails,
     DiffViewer,
-    Help,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +34,7 @@ pub struct App {
 
     // Data
     pub installed_packages: Vec<Package>,
+    pub installed_packages_set: HashSet<String>,
     pub updates: Vec<Update>,
     pub search_results: Vec<Package>,
     pub selected_package: Option<Package>,
@@ -47,10 +48,7 @@ pub struct App {
 
     // UI State
     pub list_state: ratatui::widgets::ListState,
-    pub table_state: ratatui::widgets::TableState,
     pub tab_index: usize,
-    pub cache_list_state: ratatui::widgets::ListState,
-    pub news_list_state: ratatui::widgets::ListState,
     pub orphans_list_state: ratatui::widgets::ListState,
     pub cache_active_pane: usize, // 0 = cache, 1 = orphans
 
@@ -80,6 +78,7 @@ impl App {
             input_mode: InputMode::Normal,
             search_input: Input::default(),
             installed_packages: Vec::new(),
+            installed_packages_set: HashSet::new(),
             updates: Vec::new(),
             search_results: Vec::new(),
             selected_package: None,
@@ -91,10 +90,7 @@ impl App {
             pkgbuild_lines: Vec::new(),
             pkgbuild_scroll: 0,
             list_state: ratatui::widgets::ListState::default(),
-            table_state: ratatui::widgets::TableState::default(),
             tab_index: 0,
-            cache_list_state: ratatui::widgets::ListState::default(),
-            news_list_state: ratatui::widgets::ListState::default(),
             orphans_list_state: ratatui::widgets::ListState::default(),
             cache_active_pane: 0,
             store_category_index: 0,
@@ -110,10 +106,6 @@ impl App {
 
     pub fn tick(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % 10;
-    }
-
-    pub fn quit(&mut self) {
-        self.running = false;
     }
 
     pub fn tab_route(index: usize) -> Route {

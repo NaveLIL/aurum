@@ -4,6 +4,7 @@ use anyhow::Result;
 
 const AUR_RPC_URL: &str = "https://aur.archlinux.org/rpc/";
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct RpcResponse {
     version: i32,
@@ -48,8 +49,13 @@ impl AurClient {
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<Package>> {
-        let url = format!("{}?v=5&type=search&arg={}", AUR_RPC_URL, query);
-        let resp: RpcResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: RpcResponse = self.client
+            .get(AUR_RPC_URL)
+            .query(&[("v", "5"), ("type", "search"), ("arg", query)])
+            .send()
+            .await?
+            .json()
+            .await?;
         
         if resp.type_ == "error" {
             return Err(anyhow::anyhow!("AUR RPC Error: {:?}", resp.error));
@@ -58,18 +64,27 @@ impl AurClient {
         Ok(resp.results.into_iter().map(|p| p.into_package()).collect())
     }
 
+    #[allow(dead_code)]
     pub async fn info(&self, packages: &[&str]) -> Result<Vec<Package>> {
         if packages.is_empty() {
              return Ok(Vec::new());
         }
 
-        // AUR RPC supports multiple ?arg[]=...
-        let mut url = format!("{}?v=5&type=info", AUR_RPC_URL);
+        let mut params = vec![
+            ("v".to_string(), "5".to_string()),
+            ("type".to_string(), "info".to_string()),
+        ];
         for p in packages {
-            url.push_str(&format!("&arg[]={}", p));
+            params.push(("arg[]".to_string(), p.to_string()));
         }
 
-        let resp: RpcResponse = self.client.get(&url).send().await?.json().await?;
+        let resp: RpcResponse = self.client
+            .get(AUR_RPC_URL)
+            .query(&params)
+            .send()
+            .await?
+            .json()
+            .await?;
 
         Ok(resp.results.into_iter().map(|p| p.into_package()).collect())
     }

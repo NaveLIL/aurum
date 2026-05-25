@@ -829,7 +829,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
             app.status_message.as_deref().unwrap_or("Loading...")
         )
     } else {
-        app.status_message.clone().unwrap_or_else(|| "Ready".to_string())
+        app.status_message.as_deref().unwrap_or("Ready").to_string()
     };
 
     let route_name = match app.route {
@@ -918,9 +918,16 @@ fn draw_pkgbuild_viewer(f: &mut Frame, app: &mut App, area: Rect) {
         ))
         .style(Style::default());
 
-    let paragraph = Paragraph::new(app.pkgbuild_lines.clone())
+    let lines: Vec<Line<'_>> = app.pkgbuild_lines.iter().map(|line| {
+        let spans: Vec<Span<'_>> = line.iter().map(|span| {
+            Span::styled(&*span.content, span.style)
+        }).collect();
+        Line::from(spans)
+    }).collect();
+
+    let paragraph = Paragraph::new(lines)
         .block(block)
-        .scroll((app.pkgbuild_scroll as u16, 0));
+        .scroll((app.pkgbuild_scroll.try_into().unwrap_or(u16::MAX), 0));
 
     f.render_widget(paragraph, area);
 }
@@ -995,7 +1002,7 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
             };
 
-            let is_installed = app.installed_packages.iter().any(|p| p.name == store_app.name);
+            let is_installed = app.installed_packages_set.contains(store_app.name);
             let status_span = if is_installed {
                 Span::styled(" (Installed)", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::ITALIC))
             } else {

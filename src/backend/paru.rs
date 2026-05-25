@@ -3,6 +3,9 @@ use crate::types::{Package, Update, CacheEntry};
 use anyhow::{Result, Context};
 use regex::Regex;
 use dirs;
+use std::sync::OnceLock;
+
+static UPDATE_RE: OnceLock<Regex> = OnceLock::new();
 
 pub struct Paru;
 
@@ -20,7 +23,7 @@ impl Paru {
 
         let stdout = String::from_utf8(output.stdout)?;
         let mut updates = Vec::new();
-        let re = Regex::new(r"^(\S+)\s+(\S+)\s+->\s+(\S+)")?;
+        let re = UPDATE_RE.get_or_init(|| Regex::new(r"^(\S+)\s+(\S+)\s+->\s+(\S+)").unwrap());
 
         for line in stdout.lines() {
             if let Some(caps) = re.captures(line) {
@@ -131,31 +134,6 @@ impl Paru {
         Ok(String::from_utf8(output.stdout)?)
     }
 
-    pub async fn get_cache_entries() -> Result<Vec<String>> {
-        tokio::task::spawn_blocking(move || {
-            let cache_dir = dirs::cache_dir()
-                .ok_or_else(|| anyhow::anyhow!("No cache dir"))?
-                .join("paru/clone");
-
-            if !cache_dir.exists() {
-                return Ok(Vec::new());
-            }
-
-            let mut entries = Vec::new();
-            for entry in std::fs::read_dir(cache_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    if let Ok(name) = entry.file_name().into_string() {
-                        entries.push(name);
-                    }
-                }
-            }
-            entries.sort();
-            Ok(entries)
-        })
-        .await
-        .context("spawn_blocking failed")?
-    }
 
     pub async fn get_cache_entries_with_size() -> Result<Vec<CacheEntry>> {
         tokio::task::spawn_blocking(move || {

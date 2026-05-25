@@ -1,18 +1,20 @@
+use std::sync::OnceLock;
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::{ThemeSet, Style as SyntectStyle};
 use syntect::easy::HighlightLines;
 use ratatui::style::{Color, Style as RatatuiStyle, Modifier};
 use ratatui::text::{Span, Line};
 
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
 pub fn highlight_pkgbuild(content: &str) -> Vec<Line<'static>> {
-    // Load syntax and theme sets
-    let ps = SyntaxSet::load_defaults_newlines();
-    // Use the Bourne-Again Shell (bash) syntax
+    let ps = SYNTAX_SET.get_or_init(|| SyntaxSet::load_defaults_newlines());
+    let ts = THEME_SET.get_or_init(|| ThemeSet::load_defaults());
+
     let syntax = ps.find_syntax_by_extension("sh")
         .unwrap_or_else(|| ps.find_syntax_plain_text());
 
-    let ts = ThemeSet::load_defaults();
-    // Use a standard dark theme, e.g., "base16-ocean.dark" or "Solarized (dark)"
     let theme = &ts.themes["base16-ocean.dark"];
 
     let mut h = HighlightLines::new(syntax, theme);

@@ -21,6 +21,11 @@ pub const STORE_APPS: &[StoreApp] = &[
         category: "🌐 Internet",
     },
     StoreApp {
+        name: "firefox",
+        description: "Safe and customizable open-source web browser from Mozilla",
+        category: "🌐 Internet",
+    },
+    StoreApp {
         name: "brave-bin",
         description: "Privacy-focused web browser blocking ads and trackers by default",
         category: "🌐 Internet",
@@ -38,6 +43,16 @@ pub const STORE_APPS: &[StoreApp] = &[
     StoreApp {
         name: "zoom",
         description: "Video conferencing and web conferencing service",
+        category: "🌐 Internet",
+    },
+    StoreApp {
+        name: "qbittorrent",
+        description: "Famous open-source BitTorrent client in C++ / Qt",
+        category: "🌐 Internet",
+    },
+    StoreApp {
+        name: "transmission-gtk",
+        description: "Fast, easy, and free BitTorrent client",
         category: "🌐 Internet",
     },
 
@@ -67,6 +82,16 @@ pub const STORE_APPS: &[StoreApp] = &[
         description: "API platform for building and using APIs",
         category: "🛠 Development",
     },
+    StoreApp {
+        name: "dbeaver",
+        description: "Free universal database tool and SQL client",
+        category: "🛠 Development",
+    },
+    StoreApp {
+        name: "docker",
+        description: "Pack, ship and run any application as a lightweight container",
+        category: "🛠 Development",
+    },
 
     // Multimedia
     StoreApp {
@@ -92,6 +117,21 @@ pub const STORE_APPS: &[StoreApp] = &[
     StoreApp {
         name: "blender",
         description: "Fully integrated 3D creation suite",
+        category: "🎬 Multimedia",
+    },
+    StoreApp {
+        name: "kdenlive",
+        description: "Non-linear video editor by KDE, based on MLT framework",
+        category: "🎬 Multimedia",
+    },
+    StoreApp {
+        name: "audacity",
+        description: "Easy-to-use, multi-track audio editor and recorder",
+        category: "🎬 Multimedia",
+    },
+    StoreApp {
+        name: "inkscape",
+        description: "Professional vector graphics editor (SVG)",
         category: "🎬 Multimedia",
     },
 
@@ -121,6 +161,16 @@ pub const STORE_APPS: &[StoreApp] = &[
         description: "Run Windows software and games on Linux in bottles",
         category: "🎮 Games",
     },
+    StoreApp {
+        name: "vesktop",
+        description: "Vencord desktop app, optimized Discord client with screen sharing fixes",
+        category: "🎮 Games",
+    },
+    StoreApp {
+        name: "prism-launcher-bin",
+        description: "Highly customized, open-source Minecraft launcher",
+        category: "🎮 Games",
+    },
 
     // System
     StoreApp {
@@ -148,16 +198,25 @@ pub const STORE_APPS: &[StoreApp] = &[
         description: "Like neofetch, but much faster and written in C",
         category: "⚙ System",
     },
+    StoreApp {
+        name: "htop",
+        description: "Interactive process viewer and system monitor",
+        category: "⚙ System",
+    },
+    StoreApp {
+        name: "gparted",
+        description: "Graphical partition editor for managing disk partitions",
+        category: "⚙ System",
+    },
 ];
 
-pub fn get_categories() -> Vec<&'static str> {
-    CATEGORIES.to_vec()
+pub fn get_categories() -> &'static [&'static str] {
+    CATEGORIES
 }
 
-pub fn get_apps_by_category(category: &str) -> Vec<StoreApp> {
+pub fn get_apps_by_category(category: &str) -> Vec<&'static StoreApp> {
     STORE_APPS
         .iter()
         .filter(|app| app.category == category)
-        .cloned()
         .collect()
 }

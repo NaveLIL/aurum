@@ -6,6 +6,22 @@ mod backend;
 mod scanner;
 mod action;
 
+fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>) {
+    tokio::spawn(async move {
+        tx.send(Action::SetStatus("Refreshing...".to_string())).ok();
+        if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
+            tx.send(Action::SetInstalled(pkgs)).ok();
+        }
+        if let Ok(updates) = backend::paru::Paru::get_updates().await {
+            tx.send(Action::SetUpdates(updates)).ok();
+        }
+        if let Ok(orphans) = backend::paru::Paru::get_orphans().await {
+            tx.send(Action::SetOrphans(orphans)).ok();
+        }
+        tx.send(Action::SetStatus("Ready".to_string())).ok();
+    });
+}
+
 use app::App;
 use action::Action;
 use config::Config;
@@ -18,10 +34,22 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::time::{Duration, Instant};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Setup panic hook to restore terminal
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        crossterm::terminal::disable_raw_mode().ok();
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        ).ok();
+        original_hook(panic_info);
+    }));
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -36,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Channel for actions
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let input_active = Arc::new(AtomicBool::new(true));
+    let input_paused = Arc::new(AtomicBool::new(false));
 
     // Initial data fetch
     let tx_load = tx.clone();
@@ -80,27 +109,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tick_rate = Duration::from_millis(250);
     let tx_input = tx.clone();
     let input_active_clone = input_active.clone();
+    let input_paused_clone = input_paused.clone();
     tokio::spawn(async move {
         let mut last_tick = Instant::now();
         loop {
-            if !input_active_clone.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            if !input_active_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                input_paused_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
+            input_paused_clone.store(false, std::sync::atomic::Ordering::SeqCst);
 
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
 
             if crossterm::event::poll(timeout).unwrap_or(false) {
-                if input_active_clone.load(Ordering::Relaxed) {
-                    if let Event::Key(key) = event::read().unwrap() {
-                        tx_input.send(Action::Key(key)).ok();
+                if input_active_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok(Event::Key(key)) = event::read() {
+                        if tx_input.send(Action::Key(key)).is_err() {
+                            break;
+                        }
                     }
                 }
             }
             if last_tick.elapsed() >= tick_rate {
-                tx_input.send(Action::Tick).ok();
+                if tx_input.send(Action::Tick).is_err() {
+                    break;
+                }
                 last_tick = Instant::now();
             }
         }
@@ -117,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Action::Tick => app.tick(),
                 Action::SetInstalled(pkgs) => {
+                    app.installed_packages_set = pkgs.iter().map(|p| p.name.clone()).collect();
                     app.installed_packages = pkgs;
                 }
                 Action::SetUpdates(updates) => {
@@ -195,12 +232,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.route = app::Route::DiffViewer;
                     app.status_message = Some("PKGBUILD loaded.".to_string());
                 }
-                // Package installation — suspend TUI and run paru
                 Action::InstallPackages(pkg_names) => {
                     if pkg_names.is_empty() {
                         continue;
                     }
-                    input_active.store(false, Ordering::Relaxed);
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
 
                     // Restore terminal before running paru
                     disable_raw_mode()?;
@@ -243,29 +282,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     terminal.clear()?;
 
                     app.selected_packages.clear();
-                    input_active.store(true, Ordering::Relaxed);
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     // Refresh data
-                    let tx_refresh = tx.clone();
-                    tokio::spawn(async move {
-                        tx_refresh.send(Action::SetStatus("Refreshing...".to_string())).ok();
-                        if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
-                            tx_refresh.send(Action::SetInstalled(pkgs)).ok();
-                        }
-                        if let Ok(updates) = backend::paru::Paru::get_updates().await {
-                            tx_refresh.send(Action::SetUpdates(updates)).ok();
-                        }
-                        if let Ok(orphans) = backend::paru::Paru::get_orphans().await {
-                            tx_refresh.send(Action::SetOrphans(orphans)).ok();
-                        }
-                        tx_refresh.send(Action::SetStatus("Ready".to_string())).ok();
-                    });
+                    spawn_refresh(tx.clone());
                 }
                 Action::RemovePackages(pkg_names) => {
                     if pkg_names.is_empty() {
                         continue;
                     }
-                    input_active.store(false, Ordering::Relaxed);
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
 
                     // Restore terminal before running paru
                     disable_raw_mode()?;
@@ -308,23 +337,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     terminal.clear()?;
 
                     app.selected_packages.clear();
-                    input_active.store(true, Ordering::Relaxed);
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     // Refresh data
-                    let tx_refresh = tx.clone();
-                    tokio::spawn(async move {
-                        tx_refresh.send(Action::SetStatus("Refreshing...".to_string())).ok();
-                        if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
-                            tx_refresh.send(Action::SetInstalled(pkgs)).ok();
-                        }
-                        if let Ok(updates) = backend::paru::Paru::get_updates().await {
-                            tx_refresh.send(Action::SetUpdates(updates)).ok();
-                        }
-                        if let Ok(orphans) = backend::paru::Paru::get_orphans().await {
-                            tx_refresh.send(Action::SetOrphans(orphans)).ok();
-                        }
-                        tx_refresh.send(Action::SetStatus("Ready".to_string())).ok();
-                    });
+                    spawn_refresh(tx.clone());
                 }
                 Action::ToggleSelect(name) => {
                     if app.selected_packages.contains(&name) {
@@ -337,7 +353,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tx.send(Action::InstallPackages(vec![pkg_name])).ok();
                 }
                 Action::UpdateAll => {
-                    input_active.store(false, Ordering::Relaxed);
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
 
                     disable_raw_mode()?;
                     execute!(
@@ -375,19 +394,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     terminal.clear()?;
 
-                    input_active.store(true, Ordering::Relaxed);
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
-                    let tx_refresh = tx.clone();
-                    tokio::spawn(async move {
-                        tx_refresh.send(Action::SetStatus("Refreshing...".to_string())).ok();
-                        if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
-                            tx_refresh.send(Action::SetInstalled(pkgs)).ok();
-                        }
-                        if let Ok(updates) = backend::paru::Paru::get_updates().await {
-                            tx_refresh.send(Action::SetUpdates(updates)).ok();
-                        }
-                        tx_refresh.send(Action::SetStatus("Ready".to_string())).ok();
-                    });
+                    spawn_refresh(tx.clone());
                 }
                 Action::CleanCache(name) => {
                     app.status_message = Some(format!("Deleting cache for {}...", name));

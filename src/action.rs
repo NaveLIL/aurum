@@ -1,5 +1,6 @@
 use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Action {
     Tick,
