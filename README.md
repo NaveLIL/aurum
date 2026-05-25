@@ -1,54 +1,62 @@
 # Aurum
 
-A lightweight, keyboard-driven terminal dashboard and security auditor for the Arch Linux/CachyOS AUR helper (`paru`). Built with Rust, Ratatui, and Tokio.
-
-Aurum integrates package updates, official news, clone directories inspection, and static analysis of PKGBUILD files into a single asynchronous command-line workspace.
-
-![Aurum Screen Preview](https://raw.githubusercontent.com/username/aurum/main/assets/preview.png) *(Add your screenshot here)*
+Aurum is a lightweight keyboard-driven terminal dashboard for Arch Linux/CachyOS that integrates `paru` with package updates, AUR search, PKGBUILD security scanning, build cache inspection, and Arch news.
 
 ## Features
 
-- **Asynchronous Engine**: Built on Tokio. All external commands (invoking `paru`, fetching metadata) and recursive disk I/O are performed out-of-thread to ensure the UI frame rate remains perfectly fluid.
-- **PKGBUILD Security Scan**: Statically inspects package recipes (PKGBUILD) for suspicious code patterns—such as Base64 decoding, nested `eval`, remote scripts piped to `sh`, or dangerous file deletions—before compilation.
-- **Cache Pruning**: Scans and displays exact build cache size inside `~/.cache/paru/clone`. Prune single package builds or purge everything in one keystroke.
-- **Arch News Feed**: RSS parsing of the official Arch Linux feeds to alert you to manual packaging interventions before running updates.
-- **Clean Shell Suspension**: Smoothly drops back to the raw terminal layout during compilation and package installation, returning focus back to the TUI once the subshell closes.
+- **Asynchronous UI**: Built on Tokio and Ratatui. External commands and disk I/O run off the UI thread for smooth terminal interaction.
+- **Paru integration**: View installed packages, available updates, orphaned packages, and install or upgrade directly from the TUI.
+- **PKGBUILD security scanner**: Performs static analysis on PKGBUILD content and flags suspicious patterns like `curl | sh`, `eval`, `base64 -d`, and other risky operations.
+- **Build cache inspection**: Scan `~/.cache/paru/clone`, inspect package build directories, and remove individual or all cached builds.
+- **Application store**: Browse curated Arch/ AUR applications by category, view descriptions, and see installed status in one place.
+- **Arch news feed**: Fetches official Arch Linux news to surface important announcements before package operations.
+- **Clean shell suspension**: Restores the terminal before running external package commands and returns cleanly to the TUI afterwards.
 
 ## Installation
 
-Ensure you have `paru` and a working Rust toolchain.
+### Requirements
 
-Clone the repository and run the installation script:
+- Rust toolchain (`rustc` + `cargo`)
+- `paru`
+- `git`
+- Arch-based distribution or compatible environment
+
+### Install from repository
 
 ```bash
-git clone https://github.com/yourusername/aurum.git
+git clone https://github.com/NaveLIL/aurum.git
 cd aurum
 ./install.sh
 ```
 
-The script compiles the project in release mode, installs the binary at `~/.local/bin/aurum`, and copies the desktop file launcher to your local share applications directory. Make sure `~/.local/bin` is in your `$PATH`.
+The install script builds the release binary, installs it to `~/.local/bin/aurum`, and installs the desktop entry to `~/.local/share/applications/aurum.desktop`.
 
-## Default Keybindings
+Make sure `~/.local/bin` is included in your `PATH`.
 
-| Key | Action |
-| --- | --- |
-| `Tab` / `Shift+Tab` | Navigate between dashboard tabs |
-| `j` / `Down` / `k` / `Up` | Scroll through lists (Updates, Installed, News, Cache, Scanner) |
-| `/` | Focus the AUR search bar |
-| `Enter` | Install selected package (in Updates/Search) or View Details (in Installed) |
-| `s` | Run security analysis on selected PKGBUILD |
-| `u` | Update currently selected package |
-| `U` | Run full upgrade of all AUR packages (`paru -Sua`) |
-| `d` | Delete selected clone build directory from cache |
-| `D` | Clear all build directories in the clone cache |
-| `Esc` | Cancel input focus / exit search |
-| `q` | Quit |
+## AUR packaging
+
+Aurum includes a `PKGBUILD` and `.SRCINFO` for Arch/ AUR publication. If you want to build the package locally, use:
+
+```bash
+makepkg -si
+```
+
+This will build the binary and install the package into the local system package database.
+
+## Usage
+
+- Run `aurum` from a terminal
+- Use `Tab` / `Shift+Tab` to switch tabs
+- Use arrow keys or `j` / `k` to navigate lists
+- Press `/` to search AUR
+- Press `Enter` to view details or install a selected package
+- Press `q` to quit
 
 ## Configuration
 
-Aurum stores its settings in `~/.config/aurum/config.json`. The configuration file is generated automatically on the first launch.
+Aurum stores settings in `~/.config/aurum/config.json`. The file is created automatically on first launch.
 
-Example structure:
+Example configuration:
 
 ```json
 {
@@ -67,15 +75,15 @@ Example structure:
 }
 ```
 
-You can add custom regular expressions to `risky_patterns` to expand the static analysis scanner for your specific rules.
+Add or adjust `risky_patterns` for your own security rules.
 
 ## Contributing
 
-1. Fork it
-2. Create your feature branch (`git checkout -b feature/cool-idea`)
-3. Commit your changes (`git commit -am 'Add cool-idea'`)
-4. Push to the branch (`git push origin feature/cool-idea`)
-5. Create a new Pull Request
+1. Fork the repository
+2. Create a branch (`git checkout -b feature/name`)
+3. Commit your changes (`git commit -m 'Add feature'`)
+4. Push your branch (`git push origin feature/name`)
+5. Open a pull request
 
 ## License
 
