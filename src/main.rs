@@ -152,7 +152,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.status_message = Some("✅ Scan complete.".to_string());
                 }
                 // Package installation — suspend TUI and run paru
-                Action::InstallPackage(pkg_name) => {
+                Action::InstallPackages(pkg_names) => {
+                    if pkg_names.is_empty() {
+                        continue;
+                    }
                     // Restore terminal before running paru
                     disable_raw_mode()?;
                     execute!(
@@ -162,9 +165,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     terminal.show_cursor()?;
 
-                    println!("\n>>> paru -S {}\n", pkg_name);
+                    let pkgs_str = pkg_names.join(" ");
+                    println!("\n>>> paru -S {}\n", pkgs_str);
                     let status = std::process::Command::new("paru")
-                        .args(["-S", &pkg_name])
+                        .arg("-S")
+                        .args(&pkg_names)
                         .status();
 
                     match status {
@@ -190,6 +195,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         EnableMouseCapture
                     )?;
 
+                    app.selected_packages.clear();
+
                     // Refresh data
                     let tx_refresh = tx.clone();
                     tokio::spawn(async move {
@@ -203,8 +210,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tx_refresh.send(Action::SetStatus("Ready".to_string())).ok();
                     });
                 }
+                Action::ToggleSelect(name) => {
+                    if app.selected_packages.contains(&name) {
+                        app.selected_packages.remove(&name);
+                    } else {
+                        app.selected_packages.insert(name);
+                    }
+                }
                 Action::UpdateSingle(pkg_name) => {
-                    tx.send(Action::InstallPackage(pkg_name)).ok();
+                    tx.send(Action::InstallPackages(vec![pkg_name])).ok();
                 }
                 Action::UpdateAll => {
                     disable_raw_mode()?;
@@ -338,6 +352,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.route = app::Route::Search;
                                     app.tab_index = 3;
                                 }
+                                // Spacebar to toggle selection
+                                KeyCode::Char(' ') => {
+                                    let pkg_name = match app.route {
+                                        app::Route::Updates => {
+                                            app.list_state.selected()
+                                                .and_then(|i| app.updates.get(i).map(|u| u.name.clone()))
+                                        }
+                                        app::Route::Search => {
+                                            app.list_state.selected()
+                                                .and_then(|i| app.search_results.get(i).map(|p| p.name.clone()))
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(name) = pkg_name {
+                                        tx.send(Action::ToggleSelect(name)).ok();
+                                    }
+                                }
                                 // Security scan on selected package
                                 KeyCode::Char('s') => {
                                     let pkg_name = match app.route {
@@ -359,50 +390,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         tx.send(Action::ScanPackage(name)).ok();
                                     }
                                 }
-                                // Install selected package (Enter in Updates/Search)
+                                // Install selected package(s) (Enter in Updates/Search)
                                 KeyCode::Enter => {
-                                    match app.route {
-                                        app::Route::Updates => {
-                                            if let Some(i) = app.list_state.selected() {
-                                                if let Some(u) = app.updates.get(i) {
-                                                    let name = u.name.clone();
-                                                    tx.send(Action::ShowConfirm(
-                                                        format!("Install update for '{}'?", name),
-                                                        Box::new(Action::InstallPackage(name)),
-                                                    )).ok();
+                                    if !app.selected_packages.is_empty() {
+                                        let selected: Vec<String> = app.selected_packages.iter().cloned().collect();
+                                        let count = selected.len();
+                                        tx.send(Action::ShowConfirm(
+                                            format!("Install {} selected packages?", count),
+                                            Box::new(Action::InstallPackages(selected)),
+                                        )).ok();
+                                    } else {
+                                        match app.route {
+                                            app::Route::Updates => {
+                                                if let Some(i) = app.list_state.selected() {
+                                                    if let Some(u) = app.updates.get(i) {
+                                                        let name = u.name.clone();
+                                                        tx.send(Action::ShowConfirm(
+                                                            format!("Install update for '{}'?", name),
+                                                            Box::new(Action::InstallPackages(vec![name])),
+                                                        )).ok();
+                                                    }
                                                 }
                                             }
-                                        }
-                                        app::Route::Search => {
-                                            if let Some(i) = app.list_state.selected() {
-                                                if let Some(p) = app.search_results.get(i) {
-                                                    let name = p.name.clone();
-                                                    tx.send(Action::ShowConfirm(
-                                                        format!("Install '{}'?", name),
-                                                        Box::new(Action::InstallPackage(name)),
-                                                    )).ok();
+                                            app::Route::Search => {
+                                                if let Some(i) = app.list_state.selected() {
+                                                    if let Some(p) = app.search_results.get(i) {
+                                                        let name = p.name.clone();
+                                                        tx.send(Action::ShowConfirm(
+                                                            format!("Install '{}'?", name),
+                                                            Box::new(Action::InstallPackages(vec![name])),
+                                                        )).ok();
+                                                    }
                                                 }
                                             }
-                                        }
-                                        app::Route::Installed => {
-                                            // Show details
-                                            if let Some(i) = app.list_state.selected() {
-                                                if let Some(p) = app.installed_packages.get(i) {
-                                                    let name = p.name.clone();
-                                                    let tx_info = tx.clone();
-                                                    app.is_loading = true;
-                                                    app.status_message = Some(format!("Loading info for {}...", name));
-                                                    tokio::spawn(async move {
-                                                        match backend::paru::Paru::get_info(&name).await {
-                                                            Ok(Some(pkg)) => tx_info.send(Action::SetPackageInfo(pkg)).ok(),
-                                                            Ok(None) => tx_info.send(Action::Error(format!("Package '{}' not found", name))).ok(),
-                                                            Err(e) => tx_info.send(Action::Error(format!("Failed: {}", e))).ok(),
-                                                        }
-                                                    });
+                                            app::Route::Installed => {
+                                                // Show details
+                                                if let Some(i) = app.list_state.selected() {
+                                                    if let Some(p) = app.installed_packages.get(i) {
+                                                        let name = p.name.clone();
+                                                        let tx_info = tx.clone();
+                                                        app.is_loading = true;
+                                                        app.status_message = Some(format!("Loading info for {}...", name));
+                                                        tokio::spawn(async move {
+                                                            match backend::paru::Paru::get_info(&name).await {
+                                                                Ok(Some(pkg)) => tx_info.send(Action::SetPackageInfo(pkg)).ok(),
+                                                                Ok(None) => tx_info.send(Action::Error(format!("Package '{}' not found", name))).ok(),
+                                                                Err(e) => tx_info.send(Action::Error(format!("Failed: {}", e))).ok(),
+                                                            }
+                                                        });
+                                                    }
                                                 }
                                             }
+                                            _ => {}
                                         }
-                                        _ => {}
                                     }
                                 }
                                 // Update selected

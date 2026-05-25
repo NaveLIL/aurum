@@ -19,7 +19,8 @@ pub enum Action {
     Key(crossterm::event::KeyEvent),
     ScanPackage(String),
     // New: Package operations
-    InstallPackage(String),
+    InstallPackages(Vec<String>),
+    ToggleSelect(String),
     UpdateAll,
     UpdateSingle(String),
     SetPackageInfo(Package),

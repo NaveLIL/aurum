@@ -227,7 +227,15 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
         .updates
         .iter()
         .map(|u| {
+            let is_selected = app.selected_packages.contains(&u.name);
+            let select_marker = if is_selected {
+                Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
+            };
+
             let content = vec![Line::from(vec![
+                select_marker,
                 Span::styled(
                     format!("{:<25}", u.name),
                     Style::default()
@@ -242,7 +250,12 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let title = format!(" Updates ({}) — [Enter] Install  [u] Update  [U] Update All  [s] Scan ", app.updates.len());
+    let selected_count = app.selected_packages.len();
+    let title = if selected_count > 0 {
+        format!(" Updates ({}) — Selected {} — [Space] Select  [Enter] Install Selected  [u] Update  [U] Update All  [s] Scan ", app.updates.len(), selected_count)
+    } else {
+        format!(" Updates ({}) — [Space] Select  [Enter] Install Selected  [u] Update  [U] Update All  [s] Scan ", app.updates.len())
+    };
     let list = List::new(items)
         .block(
             Block::default()
@@ -365,7 +378,15 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         .search_results
         .iter()
         .map(|p| {
+            let is_selected = app.selected_packages.contains(&p.name);
+            let select_marker = if is_selected {
+                Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
+            };
+
             let mut lines = vec![Line::from(vec![
+                select_marker,
                 Span::styled(
                     format!("{:<25}", p.name),
                     Style::default()
@@ -381,7 +402,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
             if let Some(ref desc) = p.description {
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("   {}", desc.chars().take(80).collect::<String>()),
+                        format!("       {}", desc.chars().take(80).collect::<String>()),
                         Style::default().fg(Color::Rgb(140, 140, 160)),
                     ),
                 ]));
@@ -390,7 +411,12 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let title = format!(" Results ({}) — [Enter] Install  [s] Scan ", app.search_results.len());
+    let selected_count = app.selected_packages.len();
+    let title = if selected_count > 0 {
+        format!(" Results ({}) — Selected {} — [Space] Select  [Enter] Install Selected  [s] Scan ", app.search_results.len(), selected_count)
+    } else {
+        format!(" Results ({}) — [Space] Select  [Enter] Install Selected  [s] Scan ", app.search_results.len())
+    };
     let list = List::new(items)
         .block(
             Block::default()

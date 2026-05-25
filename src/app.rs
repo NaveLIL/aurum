@@ -39,6 +39,7 @@ pub struct App {
     pub scan_results: Vec<ScanResult>,
     pub news_items: Vec<NewsItem>,
     pub cache_entries: Vec<CacheEntry>,
+    pub selected_packages: std::collections::HashSet<String>,
 
     // UI State
     pub list_state: ratatui::widgets::ListState,
@@ -74,6 +75,7 @@ impl App {
             scan_results: Vec::new(),
             news_items: Vec::new(),
             cache_entries: Vec::new(),
+            selected_packages: std::collections::HashSet::new(),
             list_state: ratatui::widgets::ListState::default(),
             table_state: ratatui::widgets::TableState::default(),
             tab_index: 0,
