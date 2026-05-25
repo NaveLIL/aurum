@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Aurum
+Comment=Terminal UI for managing AUR packages with paru
+Exec=aurum
+Icon=system-software-install
+Terminal=true
+Type=Application
+Categories=System;PackageManager;
+Keywords=paru;aur;packages;arch;aurum;
