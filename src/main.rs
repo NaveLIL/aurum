@@ -17,6 +17,8 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Channel for actions
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let input_active = Arc::new(AtomicBool::new(true));
 
     // Initial data fetch
     let tx_load = tx.clone();
@@ -69,16 +72,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Task to handle input events
     let tick_rate = Duration::from_millis(250);
     let tx_input = tx.clone();
+    let input_active_clone = input_active.clone();
     tokio::spawn(async move {
         let mut last_tick = Instant::now();
         loop {
+            if !input_active_clone.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
 
             if crossterm::event::poll(timeout).unwrap_or(false) {
-                if let Event::Key(key) = event::read().unwrap() {
-                    tx_input.send(Action::Key(key)).ok();
+                if input_active_clone.load(Ordering::Relaxed) {
+                    if let Event::Key(key) = event::read().unwrap() {
+                        tx_input.send(Action::Key(key)).ok();
+                    }
                 }
             }
             if last_tick.elapsed() >= tick_rate {
@@ -156,6 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if pkg_names.is_empty() {
                         continue;
                     }
+                    input_active.store(false, Ordering::Relaxed);
+
                     // Restore terminal before running paru
                     disable_raw_mode()?;
                     execute!(
@@ -197,6 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     terminal.clear()?;
 
                     app.selected_packages.clear();
+                    input_active.store(true, Ordering::Relaxed);
 
                     // Refresh data
                     let tx_refresh = tx.clone();
@@ -222,6 +236,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tx.send(Action::InstallPackages(vec![pkg_name])).ok();
                 }
                 Action::UpdateAll => {
+                    input_active.store(false, Ordering::Relaxed);
+
                     disable_raw_mode()?;
                     execute!(
                         terminal.backend_mut(),
@@ -257,6 +273,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         EnableMouseCapture
                     )?;
                     terminal.clear()?;
+
+                    input_active.store(true, Ordering::Relaxed);
 
                     let tx_refresh = tx.clone();
                     tokio::spawn(async move {
