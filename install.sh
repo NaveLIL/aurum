@@ -6,6 +6,7 @@ cargo build --release
 
 echo "📦 Installing binary to ~/.local/bin..."
 mkdir -p ~/.local/bin
+rm -f ~/.local/bin/aurum
 cp target/release/aurum ~/.local/bin/aurum
 chmod +x ~/.local/bin/aurum
 
