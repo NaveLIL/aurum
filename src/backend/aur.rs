@@ -9,7 +9,7 @@ struct RpcResponse {
     version: i32,
     #[serde(rename = "type")]
     type_: String,
-    result_count: usize,
+    resultcount: usize,
     results: Vec<RpcPackage>,
     error: Option<String>,
 }
