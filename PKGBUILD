@@ -8,16 +8,16 @@ license=('MIT')
 depends=('paru' 'libgit2')
 optdepends=('flatpak: Flatpak search, installed apps view, and app install/uninstall support')
 makedepends=('cargo' 'rust' 'pkg-config' 'libgit2')
-source=("aurum::https://github.com/NaveLIL/aurum/archive/825cb51eb891548b80812028c9f98944e6d5fddb.tar.gz")
-sha256sums=('e36e1a37291b49456ca45fbe519cb0c23de7e423b81975e3aa896769b1be6173')
+source=("aurum::https://github.com/NaveLIL/aurum/archive/18f8a4ee8d7a6055b24f7c7d3e77993b20f87a1e.tar.gz")
+sha256sums=('d5558cd419c8d46bdc958064cb97f963d1ea793866414c025906ec15033512ed')
 
 build() {
-  cd "${srcdir}/aurum-825cb51eb891548b80812028c9f98944e6d5fddb"
+  cd "${srcdir}/aurum-18f8a4ee8d7a6055b24f7c7d3e77993b20f87a1e"
   cargo build --release --locked
 }
 
 package() {
-  cd "${srcdir}/aurum-825cb51eb891548b80812028c9f98944e6d5fddb"
+  cd "${srcdir}/aurum-18f8a4ee8d7a6055b24f7c7d3e77993b20f87a1e"
   install -Dm755 "target/release/aurum" "${pkgdir}/usr/bin/aurum"
   install -Dm644 "aurum.desktop" "${pkgdir}/usr/share/applications/aurum.desktop"
 }

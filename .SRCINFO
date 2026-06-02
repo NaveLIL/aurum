@@ -1,5 +1,5 @@
 pkgbase = aurum
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/NaveLIL/aurum
 	arch = x86_64
@@ -11,7 +11,7 @@ pkgbase = aurum
 	depends = paru
 	depends = libgit2
 	optdepends = flatpak: Flatpak search, installed apps view, and app install/uninstall support
-	source = aurum::https://github.com/NaveLIL/aurum/archive/825cb51eb891548b80812028c9f98944e6d5fddb.tar.gz
-	sha256sums = e36e1a37291b49456ca45fbe519cb0c23de7e423b81975e3aa896769b1be6173
+	source = aurum::https://github.com/NaveLIL/aurum/archive/18f8a4ee8d7a6055b24f7c7d3e77993b20f87a1e.tar.gz
+	sha256sums = d5558cd419c8d46bdc958064cb97f963d1ea793866414c025906ec15033512ed
 
 pkgname = aurum
