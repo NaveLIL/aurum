@@ -3,6 +3,21 @@ use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry};
 use crate::config::Config;
 use crate::action::Action;
 use std::collections::HashSet;
+use crate::backend::flatpak::{FlatpakApp, FlatpakSearchApp};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchSource {
+    #[default]
+    Aur,
+    Flatpak,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InstalledSource {
+    #[default]
+    System,
+    Flatpak,
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Route {
@@ -45,6 +60,13 @@ pub struct App {
     pub selected_packages: std::collections::HashSet<String>,
     pub pkgbuild_lines: Vec<ratatui::text::Line<'static>>,
     pub pkgbuild_scroll: usize,
+
+    // Flatpak
+    pub flatpak_available: bool,
+    pub search_source: SearchSource,
+    pub installed_source: InstalledSource,
+    pub flatpak_search_results: Vec<FlatpakSearchApp>,
+    pub installed_flatpaks: Vec<FlatpakApp>,
 
     // UI State
     pub list_state: ratatui::widgets::ListState,
@@ -89,6 +111,11 @@ impl App {
             selected_packages: std::collections::HashSet::new(),
             pkgbuild_lines: Vec::new(),
             pkgbuild_scroll: 0,
+            flatpak_available: false,
+            search_source: SearchSource::default(),
+            installed_source: InstalledSource::default(),
+            flatpak_search_results: Vec::new(),
+            installed_flatpaks: Vec::new(),
             list_state: ratatui::widgets::ListState::default(),
             tab_index: 0,
             orphans_list_state: ratatui::widgets::ListState::default(),
@@ -142,8 +169,18 @@ impl App {
     pub fn current_list_len(&self) -> usize {
         match self.route {
             Route::Updates => self.updates.len(),
-            Route::Installed => self.installed_packages.len(),
-            Route::Search => self.search_results.len(),
+            Route::Installed => {
+                match self.installed_source {
+                    InstalledSource::System => self.installed_packages.len(),
+                    InstalledSource::Flatpak => self.installed_flatpaks.len(),
+                }
+            }
+            Route::Search => {
+                match self.search_source {
+                    SearchSource::Aur => self.search_results.len(),
+                    SearchSource::Flatpak => self.flatpak_search_results.len(),
+                }
+            }
             Route::News => self.news_items.len(),
             Route::Cache => self.cache_entries.len(),
             Route::Scanner => self.scan_results.last().map_or(0, |r| r.vulnerabilities.len()),

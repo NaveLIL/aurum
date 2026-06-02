@@ -5,19 +5,63 @@ mod ui;
 mod backend;
 mod scanner;
 mod action;
+fn translate_cyrillic(c: char) -> char {
+    match c {
+        // Lowercase
+        'й' => 'q', 'ц' => 'w', 'у' => 'e', 'к' => 'r', 'е' => 't', 'н' => 'y', 'г' => 'u', 'ш' => 'i', 'щ' => 'o', 'з' => 'p', 'х' => '[', 'ъ' => ']',
+        'ф' => 'a', 'ы' => 's', 'в' => 'd', 'а' => 'f', 'п' => 'g', 'р' => 'h', 'о' => 'j', 'л' => 'k', 'д' => 'l', 'ж' => ';', 'э' => '\'',
+        'я' => 'z', 'ч' => 'x', 'с' => 'c', 'м' => 'v', 'и' => 'b', 'т' => 'n', 'ь' => 'm', 'б' => ',', 'ю' => '.',
+        // Uppercase
+        'Й' => 'Q', 'Ц' => 'W', 'У' => 'E', 'К' => 'R', 'Е' => 'T', 'Н' => 'Y', 'Г' => 'U', 'Ш' => 'I', 'Щ' => 'O', 'З' => 'P', 'Х' => '{', 'Ъ' => '}',
+        'Ф' => 'A', 'Ы' => 'S', 'В' => 'D', 'А' => 'F', 'П' => 'G', 'Р' => 'H', 'О' => 'J', 'Л' => 'K', 'Д' => 'L', 'Ж' => ':', 'Э' => '"',
+        'Я' => 'Z', 'Ч' => 'X', 'С' => 'C', 'М' => 'V', 'И' => 'B', 'Т' => 'N', 'Ь' => 'M', 'Б' => '<', 'Ю' => '>',
+        _ => c,
+    }
+}
 
-fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>) {
+fn command_exists(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-lc", &format!("command -v {} >/dev/null 2>&1", command)])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_available: bool) {
     tokio::spawn(async move {
         tx.send(Action::SetStatus("Refreshing...".to_string())).ok();
-        if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
-            tx.send(Action::SetInstalled(pkgs)).ok();
-        }
-        if let Ok(updates) = backend::paru::Paru::get_updates().await {
-            tx.send(Action::SetUpdates(updates)).ok();
-        }
-        if let Ok(orphans) = backend::paru::Paru::get_orphans().await {
-            tx.send(Action::SetOrphans(orphans)).ok();
-        }
+
+        let tx1 = tx.clone();
+        let t1 = tokio::spawn(async move {
+            if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
+                tx1.send(Action::SetInstalled(pkgs)).ok();
+            }
+        });
+
+        let tx2 = tx.clone();
+        let t2 = tokio::spawn(async move {
+            if let Ok(updates) = backend::paru::Paru::get_updates().await {
+                tx2.send(Action::SetUpdates(updates)).ok();
+            }
+        });
+
+        let tx3 = tx.clone();
+        let t3 = tokio::spawn(async move {
+            if let Ok(orphans) = backend::paru::Paru::get_orphans().await {
+                tx3.send(Action::SetOrphans(orphans)).ok();
+            }
+        });
+
+        let tx4 = tx.clone();
+        let t4 = tokio::spawn(async move {
+            if flatpak_available {
+                if let Ok(flatpaks) = backend::flatpak::Flatpak::get_installed().await {
+                    tx4.send(Action::SetFlatpakInstalled(flatpaks)).ok();
+                }
+            }
+        });
+
+        let _ = tokio::join!(t1, t2, t3, t4);
         tx.send(Action::SetStatus("Ready".to_string())).ok();
     });
 }
@@ -69,39 +113,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initial data fetch
     let tx_load = tx.clone();
     tokio::spawn(async move {
-        tx_load.send(Action::SetStatus("Loading installed packages...".to_string())).ok();
-        match backend::paru::Paru::get_installed().await {
-            Ok(pkgs) => tx_load.send(Action::SetInstalled(pkgs)).ok(),
-            Err(e) => tx_load.send(Action::Error(format!("Failed to load installed: {}", e))).ok(),
-        };
+        tx_load.send(Action::SetStatus("Loading data...".to_string())).ok();
 
-        tx_load.send(Action::SetStatus("Checking for updates...".to_string())).ok();
-        match backend::paru::Paru::get_updates().await {
-            Ok(updates) => tx_load.send(Action::SetUpdates(updates)).ok(),
-            Err(e) => tx_load.send(Action::Error(format!("Failed to check updates: {}", e))).ok(),
-        };
+        let tx1 = tx_load.clone();
+        let t1 = tokio::spawn(async move {
+            match backend::paru::Paru::get_installed().await {
+                Ok(pkgs) => { tx1.send(Action::SetInstalled(pkgs)).ok(); }
+                Err(e) => { tx1.send(Action::Error(format!("Failed to load installed: {}", e))).ok(); }
+            }
+        });
 
-        // Load news
-        tx_load.send(Action::SetStatus("Loading Arch news...".to_string())).ok();
-        match backend::news::fetch_arch_news().await {
-            Ok(news) => tx_load.send(Action::SetNews(news)).ok(),
-            Err(e) => tx_load.send(Action::Error(format!("Failed to load news: {}", e))).ok(),
-        };
+        let tx2 = tx_load.clone();
+        let t2 = tokio::spawn(async move {
+            match backend::paru::Paru::get_updates().await {
+                Ok(updates) => { tx2.send(Action::SetUpdates(updates)).ok(); }
+                Err(e) => { tx2.send(Action::Error(format!("Failed to check updates: {}", e))).ok(); }
+            }
+        });
 
-        // Load cache
-        tx_load.send(Action::SetStatus("Scanning cache...".to_string())).ok();
-        match backend::paru::Paru::get_cache_entries_with_size().await {
-            Ok(entries) => tx_load.send(Action::SetCacheEntries(entries)).ok(),
-            Err(e) => tx_load.send(Action::Error(format!("Failed to scan cache: {}", e))).ok(),
-        };
+        let tx3 = tx_load.clone();
+        let t3 = tokio::spawn(async move {
+            match backend::news::fetch_arch_news().await {
+                Ok(news) => { tx3.send(Action::SetNews(news)).ok(); }
+                Err(e) => { tx3.send(Action::Error(format!("Failed to load news: {}", e))).ok(); }
+            }
+        });
 
-        // Load orphans
-        tx_load.send(Action::SetStatus("Checking for orphans...".to_string())).ok();
-        match backend::paru::Paru::get_orphans().await {
-            Ok(orphans) => tx_load.send(Action::SetOrphans(orphans)).ok(),
-            Err(e) => tx_load.send(Action::Error(format!("Failed to check orphans: {}", e))).ok(),
-        };
+        let tx4 = tx_load.clone();
+        let t4 = tokio::spawn(async move {
+            match backend::paru::Paru::get_cache_entries_with_size().await {
+                Ok(entries) => { tx4.send(Action::SetCacheEntries(entries)).ok(); }
+                Err(e) => { tx4.send(Action::Error(format!("Failed to scan cache: {}", e))).ok(); }
+            }
+        });
 
+        let tx5 = tx_load.clone();
+        let t5 = tokio::spawn(async move {
+            match backend::paru::Paru::get_orphans().await {
+                Ok(orphans) => { tx5.send(Action::SetOrphans(orphans)).ok(); }
+                Err(e) => { tx5.send(Action::Error(format!("Failed to check orphans: {}", e))).ok(); }
+            }
+        });
+
+        let tx6 = tx_load.clone();
+        let t6 = tokio::spawn(async move {
+            let flatpak_avail = backend::flatpak::Flatpak::is_available().await;
+            tx6.send(Action::SetFlatpakAvailable(flatpak_avail)).ok();
+            if flatpak_avail {
+                if let Ok(flatpaks) = backend::flatpak::Flatpak::get_installed().await {
+                    tx6.send(Action::SetFlatpakInstalled(flatpaks)).ok();
+                }
+            }
+        });
+
+        let _ = tokio::join!(t1, t2, t3, t4, t5, t6);
         tx_load.send(Action::SetStatus("Ready".to_string())).ok();
     });
 
@@ -124,12 +189,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
 
-            if crossterm::event::poll(timeout).unwrap_or(false) {
-                if input_active_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                    if let Ok(Event::Key(key)) = event::read() {
-                        if tx_input.send(Action::Key(key)).is_err() {
-                            break;
-                        }
+            #[allow(clippy::collapsible_if)]
+            if crossterm::event::poll(timeout).unwrap_or(false)
+                && input_active_clone.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if tx_input.send(Action::Key(key)).is_err() {
+                        break;
                     }
                 }
             }
@@ -285,7 +351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     input_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     // Refresh data
-                    spawn_refresh(tx.clone());
+                    spawn_refresh(tx.clone(), app.flatpak_available);
                 }
                 Action::RemovePackages(pkg_names) => {
                     if pkg_names.is_empty() {
@@ -340,7 +406,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     input_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     // Refresh data
-                    spawn_refresh(tx.clone());
+                    spawn_refresh(tx.clone(), app.flatpak_available);
                 }
                 Action::ToggleSelect(name) => {
                     if app.selected_packages.contains(&name) {
@@ -396,7 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     input_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
-                    spawn_refresh(tx.clone());
+                    spawn_refresh(tx.clone(), app.flatpak_available);
                 }
                 Action::CleanCache(name) => {
                     app.status_message = Some(format!("Deleting cache for {}...", name));
@@ -450,8 +516,174 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Action::ConfirmNo => {
                     app.confirm_dialog = None;
                 }
+                Action::SetFlatpakAvailable(avail) => {
+                    app.flatpak_available = avail;
+                }
+                Action::SetFlatpakInstalled(apps) => {
+                    app.is_loading = false;
+                    app.installed_flatpaks = apps;
+                }
+                Action::SetFlatpakSearchResults(hits) => {
+                    app.is_loading = false;
+                    app.flatpak_search_results = hits;
+                }
+                Action::InstallFlatpakTool => {
+                    if !command_exists("paru") {
+                        app.status_message = Some("paru is not installed. Install paru first, then retry Flatpak support.".to_string());
+                        continue;
+                    }
+
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n>>> paru -S flatpak\n");
+                    let status = std::process::Command::new("paru")
+                        .arg("-S")
+                        .arg("flatpak")
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Flatpak installed successfully. Press Enter to return...");
+                        }
+                        Ok(s) => {
+                            println!("\n⚠ paru exited with code: {}. Press Enter to return...", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run paru: {}. Press Enter to return...", e);
+                        }
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    let tx_check = tx.clone();
+                    tokio::spawn(async move {
+                        let avail = backend::flatpak::Flatpak::is_available().await;
+                        tx_check.send(Action::SetFlatpakAvailable(avail)).ok();
+                        if avail {
+                            if let Ok(flatpaks) = backend::flatpak::Flatpak::get_installed().await {
+                                tx_check.send(Action::SetFlatpakInstalled(flatpaks)).ok();
+                            }
+                        }
+                    });
+                }
+                Action::InstallFlatpakApp(app_id) => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n>>> flatpak install -y flathub {}\n", app_id);
+                    let status = std::process::Command::new("flatpak")
+                        .args(["install", "-y", "flathub", &app_id])
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Application installed successfully. Press Enter to return...");
+                        }
+                        Ok(s) => {
+                            println!("\n⚠ flatpak exited with code: {}. Press Enter to return...", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run flatpak: {}. Press Enter to return...", e);
+                        }
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::RemoveFlatpakApp(app_id) => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n>>> flatpak uninstall -y {}\n", app_id);
+                    let status = std::process::Command::new("flatpak")
+                        .args(["uninstall", "-y", &app_id])
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Application uninstalled successfully. Press Enter to return...");
+                        }
+                        Ok(s) => {
+                            println!("\n⚠ flatpak exited with code: {}. Press Enter to return...", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run flatpak: {}. Press Enter to return...", e);
+                        }
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
                 // Key handling
-                Action::Key(key) => {
+                Action::Key(mut key) => {
+                    if app.input_mode != app::InputMode::Editing {
+                        if let KeyCode::Char(c) = key.code {
+                            key.code = KeyCode::Char(translate_cyrillic(c));
+                        }
+                    }
                     if app.route == app::Route::DiffViewer {
                         match key.code {
                             KeyCode::Char('j') | KeyCode::Down => {
@@ -581,8 +813,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                KeyCode::Tab => app.next_tab(),
+                                KeyCode::Tab => {
+                                    app.next_tab();
+                                }
                                 KeyCode::BackTab => app.previous_tab(),
+                                KeyCode::Char('[') => {
+                                    app.previous_tab();
+                                }
+                                KeyCode::Char(']') => {
+                                    app.next_tab();
+                                }
+                                KeyCode::Char(c) if c.is_ascii_digit() => {
+                                    let digit = c.to_digit(10).unwrap() as usize;
+                                    if (1..=8).contains(&digit) {
+                                        app.tab_index = digit - 1;
+                                        app.route = app::App::tab_route(app.tab_index);
+                                        app.list_state.select(None);
+                                    }
+                                }
+                                KeyCode::Char('t') | KeyCode::Char('T') => {
+                                    match app.route {
+                                        app::Route::Search => {
+                                            app.search_source = match app.search_source {
+                                                app::SearchSource::Aur => app::SearchSource::Flatpak,
+                                                app::SearchSource::Flatpak => app::SearchSource::Aur,
+                                            };
+                                            app.list_state.select(None);
+                                        }
+                                        app::Route::Installed => {
+                                            app.installed_source = match app.installed_source {
+                                                app::InstalledSource::System => app::InstalledSource::Flatpak,
+                                                app::InstalledSource::Flatpak => app::InstalledSource::System,
+                                            };
+                                            app.list_state.select(None);
+                                        }
+                                        _ => {}
+                                    }
+                                }
                                 KeyCode::Char('/') => {
                                     app.input_mode = app::InputMode::Editing;
                                     app.route = app::Route::Search;
@@ -688,13 +955,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                             }
                                             app::Route::Search => {
-                                                if let Some(i) = app.list_state.selected() {
-                                                    if let Some(p) = app.search_results.get(i) {
-                                                        let name = p.name.clone();
-                                                        tx.send(Action::ShowConfirm(
-                                                            format!("Install '{}'?", name),
-                                                            Box::new(Action::InstallPackages(vec![name])),
-                                                        )).ok();
+                                                match app.search_source {
+                                                    app::SearchSource::Aur => {
+                                                        if let Some(i) = app.list_state.selected() {
+                                                            if let Some(p) = app.search_results.get(i) {
+                                                                let name = p.name.clone();
+                                                                tx.send(Action::ShowConfirm(
+                                                                    format!("Install '{}'?", name),
+                                                                    Box::new(Action::InstallPackages(vec![name])),
+                                                                )).ok();
+                                                            }
+                                                        }
+                                                    }
+                                                    app::SearchSource::Flatpak => {
+                                                        if let Some(i) = app.list_state.selected() {
+                                                            if let Some(a) = app.flatpak_search_results.get(i) {
+                                                                let app_id = a.app_id.clone();
+                                                                tx.send(Action::ShowConfirm(
+                                                                    format!("Install Flatpak app '{}'?", a.name),
+                                                                    Box::new(Action::InstallFlatpakApp(app_id)),
+                                                                )).ok();
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -767,15 +1049,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     )).ok();
                                                 }
                                             }
-                                        } else {
-                                            if let Some(i) = app.orphans_list_state.selected() {
-                                                if let Some(pkg) = app.orphans.get(i) {
-                                                    let name = pkg.name.clone();
-                                                    tx.send(Action::ShowConfirm(
-                                                        format!("Remove orphan package '{}'?", name),
-                                                        Box::new(Action::RemovePackages(vec![name])),
-                                                    )).ok();
-                                                }
+                                        } else if let Some(i) = app.orphans_list_state.selected() {
+                                            if let Some(pkg) = app.orphans.get(i) {
+                                                let name = pkg.name.clone();
+                                                tx.send(Action::ShowConfirm(
+                                                    format!("Remove orphan package '{}' ?", name),
+                                                    Box::new(Action::RemovePackages(vec![name])),
+                                                )).ok();
+                                            }
+                                        }
+                                    } else if app.route == app::Route::Installed && app.installed_source == app::InstalledSource::Flatpak {
+                                        if let Some(i) = app.list_state.selected() {
+                                            if let Some(a) = app.installed_flatpaks.get(i) {
+                                                let app_id = a.app_id.clone();
+                                                tx.send(Action::ShowConfirm(
+                                                    format!("Uninstall Flatpak app '{}'?", a.name),
+                                                    Box::new(Action::RemoveFlatpakApp(app_id)),
+                                                )).ok();
                                             }
                                         }
                                     }
@@ -790,15 +1080,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     Box::new(Action::CleanAllCache),
                                                 )).ok();
                                             }
-                                        } else {
-                                            if !app.orphans.is_empty() {
-                                                let names: Vec<String> = app.orphans.iter().map(|o| o.name.clone()).collect();
-                                                tx.send(Action::ShowConfirm(
-                                                    format!("Remove ALL {} orphan packages?", names.len()),
-                                                    Box::new(Action::RemovePackages(names)),
-                                                )).ok();
-                                            }
+                                        } else if !app.orphans.is_empty() {
+                                            let names: Vec<String> = app.orphans.iter().map(|o| o.name.clone()).collect();
+                                            tx.send(Action::ShowConfirm(
+                                                format!("Remove ALL {} orphan packages?", names.len()),
+                                                Box::new(Action::RemovePackages(names)),
+                                            )).ok();
                                         }
+                                    }
+                                }
+                                KeyCode::Char('f') | KeyCode::Char('F') => {
+                                    if !app.flatpak_available && (
+                                        (app.route == app::Route::Search && app.search_source == app::SearchSource::Flatpak) ||
+                                        (app.route == app::Route::Installed && app.installed_source == app::InstalledSource::Flatpak)
+                                    ) {
+                                        tx.send(Action::ShowConfirm(
+                                            "Install Flatpak package manager?".to_string(),
+                                            Box::new(Action::InstallFlatpakTool),
+                                        )).ok();
                                     }
                                 }
                                 _ => {}
@@ -815,15 +1114,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     let tx_search = tx.clone();
                                     app.is_loading = true;
-                                    app.search_results.clear();
 
-                                    tokio::spawn(async move {
-                                        let aur = backend::aur::AurClient::new();
-                                        match aur.search(&query).await {
-                                            Ok(pkgs) => tx_search.send(Action::SetSearchResults(pkgs)).ok(),
-                                            Err(e) => tx_search.send(Action::Error(format!("Search failed: {}", e))).ok(),
-                                        };
-                                    });
+                                    match app.search_source {
+                                        app::SearchSource::Aur => {
+                                            app.search_results.clear();
+                                            tokio::spawn(async move {
+                                                let aur = backend::aur::AurClient::new();
+                                                match aur.search(&query).await {
+                                                    Ok(pkgs) => tx_search.send(Action::SetSearchResults(pkgs)).ok(),
+                                                    Err(e) => tx_search.send(Action::Error(format!("Search failed: {}", e))).ok(),
+                                                };
+                                            });
+                                        }
+                                        app::SearchSource::Flatpak => {
+                                            app.flatpak_search_results.clear();
+                                            tokio::spawn(async move {
+                                                match backend::flatpak::Flatpak::search(&query).await {
+                                                    Ok(hits) => tx_search.send(Action::SetFlatpakSearchResults(hits)).ok(),
+                                                    Err(e) => tx_search.send(Action::Error(format!("Flathub search failed: {}", e))).ok(),
+                                                }
+                                            });
+                                        }
+                                    }
                                 }
                                 _ => {
                                     use tui_input::backend::crossterm::EventHandler;
@@ -852,4 +1164,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_translate_cyrillic() {
+        // Test lowercase mapping
+        assert_eq!(translate_cyrillic('й'), 'q');
+        assert_eq!(translate_cyrillic('о'), 'j');
+        assert_eq!(translate_cyrillic('л'), 'k');
+        assert_eq!(translate_cyrillic('в'), 'd');
+        assert_eq!(translate_cyrillic('е'), 't');
+        
+        // Test uppercase mapping
+        assert_eq!(translate_cyrillic('Й'), 'Q');
+        assert_eq!(translate_cyrillic('Г'), 'U');
+        assert_eq!(translate_cyrillic('В'), 'D');
+
+        // Test non-cyrillic remains unchanged
+        assert_eq!(translate_cyrillic('q'), 'q');
+        assert_eq!(translate_cyrillic('1'), '1');
+        assert_eq!(translate_cyrillic('['), '[');
+    }
 }

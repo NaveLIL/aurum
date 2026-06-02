@@ -43,6 +43,8 @@ makepkg -si
 
 This will build the binary and install the package into the local system package database.
 
+Flatpak support is optional at runtime: install `flatpak` only if you want the Flatpak search and installed-app tabs to work.
+
 ## Usage
 
 - Run `aurum` from a terminal

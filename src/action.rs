@@ -1,4 +1,5 @@
 use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry};
+use crate::backend::flatpak::{FlatpakApp, FlatpakSearchApp};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -41,4 +42,11 @@ pub enum Action {
     ShowConfirm(String, Box<Action>),
     ConfirmYes,
     ConfirmNo,
+    // Flatpak
+    SetFlatpakAvailable(bool),
+    SetFlatpakInstalled(Vec<FlatpakApp>),
+    SetFlatpakSearchResults(Vec<FlatpakSearchApp>),
+    InstallFlatpakTool,
+    InstallFlatpakApp(String),
+    RemoveFlatpakApp(String),
 }

@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap, ListState},
     Frame,
 };
-use crate::app::{App, Route, InputMode};
+use crate::app::{App, Route, InputMode, InstalledSource, SearchSource};
 use crate::backend::paru::format_size;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -29,7 +29,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
-    let tab_names = vec!["Dashboard", "Updates", "Installed", "Search", "Store", "News", "Cache", "Scanner"];
+    let tab_names = ["Dashboard", "Updates", "Installed", "Search", "Store", "News", "Cache", "Scanner"];
     let titles: Vec<Line> = tab_names
         .iter()
         .map(|t| {
@@ -170,11 +170,23 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
             Span::raw("  Navigate list"),
         ]),
         Line::from(vec![
-            Span::styled("  Tab  S-Tab", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Switch tab"),
+            Span::styled("  Tab/S-Tab", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("  Next/Prev tab"),
         ]),
         Line::from(vec![
-            Span::styled("  Enter     ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  1-8      ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("  Switch to tab 1-8"),
+        ]),
+        Line::from(vec![
+            Span::styled("  [/]      ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("  Next/Prev tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("  t        ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("  Toggle AUR/Flatpak"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter    ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
             Span::raw("  Install / Details"),
         ]),
         Line::from(vec![
@@ -274,47 +286,130 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
+fn draw_flatpak_missing_warning(f: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(255, 100, 100)))
+        .title(Span::styled(" ⚠ Flatpak Not Installed ", Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD)));
+    
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled("Flatpak is not installed on this system.", Style::default().fg(Color::Rgb(255, 120, 120)).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("To manage Flatpak and Flathub applications, you must install the utility first."),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Press "),
+            Span::styled(" [F] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw(" to install flatpak via paru."),
+        ]),
+        Line::from(""),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center);
+
+    f.render_widget(paragraph, area);
+}
+
 fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.installed_packages.is_empty() {
-        let msg = if app.is_loading {
-            format!("  {} Loading packages...", app.spinner_char())
-        } else {
-            "  No AUR packages found.".to_string()
-        };
-        let paragraph = Paragraph::new(msg)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Span::styled(" Installed ", Style::default().fg(Color::Rgb(100, 160, 255)))),
-            )
-            .style(Style::default().fg(Color::Rgb(140, 140, 160)));
-        f.render_widget(paragraph, area);
+    // Check if flatpak source is selected but flatpak is not available
+    if app.installed_source == InstalledSource::Flatpak && !app.flatpak_available {
+        draw_flatpak_missing_warning(f, area);
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .installed_packages
-        .iter()
-        .map(|p| {
-            let content = vec![Line::from(vec![
-                Span::styled(
-                    format!("{:<30}", p.name),
-                    Style::default()
-                        .fg(Color::Rgb(100, 180, 255))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(&p.version, Style::default().fg(Color::Rgb(180, 180, 200))),
-            ])];
-            ListItem::new(content)
-        })
-        .collect();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),    // List
+            Constraint::Length(1), // Source indicator / helper
+        ])
+        .split(area);
 
-    let title = format!(" Installed ({}) — [Enter] Details  [s] Scan ", app.installed_packages.len());
+    let (items, title_text) = match app.installed_source {
+        InstalledSource::System => {
+            if app.installed_packages.is_empty() {
+                let msg = if app.is_loading {
+                    format!("  {} Loading packages...", app.spinner_char())
+                } else {
+                    "  No AUR packages found.".to_string()
+                };
+                let paragraph = Paragraph::new(msg)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(Span::styled(" Installed Packages (System) ", Style::default().fg(Color::Rgb(100, 160, 255)))),
+                    )
+                    .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+                f.render_widget(paragraph, chunks[0]);
+                
+                // Draw source footer helper
+                let helper = Paragraph::new(Span::styled(" [t] Switch to Flatpak Mode ", Style::default().fg(Color::Rgb(120, 120, 140))));
+                f.render_widget(helper, chunks[1]);
+                return;
+            }
+
+            let list_items: Vec<ListItem> = app.installed_packages.iter().map(|p| {
+                ListItem::new(vec![Line::from(vec![
+                    Span::styled(format!("{:<30}", p.name), Style::default().fg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD)),
+                    Span::styled(&p.version, Style::default().fg(Color::Rgb(180, 180, 200))),
+                ])])
+            }).collect();
+            
+            (list_items, format!(" Installed System Packages ({}) — [Enter] Details  [s] Scan ", app.installed_packages.len()))
+        }
+        InstalledSource::Flatpak => {
+            if app.installed_flatpaks.is_empty() {
+                let msg = if app.is_loading {
+                    format!("  {} Loading Flatpak apps...", app.spinner_char())
+                } else {
+                    "  No Flatpak applications found.".to_string()
+                };
+                let paragraph = Paragraph::new(msg)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(Span::styled(" Installed Applications (Flatpak) ", Style::default().fg(Color::Rgb(0, 180, 180)))),
+                    )
+                    .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+                f.render_widget(paragraph, chunks[0]);
+
+                let helper = Paragraph::new(Span::styled(" [t] Switch to System Packages Mode ", Style::default().fg(Color::Rgb(120, 120, 140))));
+                f.render_widget(helper, chunks[1]);
+                return;
+            }
+
+            let list_items: Vec<ListItem> = app.installed_flatpaks.iter().map(|a| {
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(format!("{:<30}", a.name), Style::default().fg(Color::Rgb(0, 200, 180)).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" v{}", a.version), Style::default().fg(Color::Rgb(180, 180, 200))),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled(&a.app_id, Style::default().fg(Color::Rgb(120, 120, 140))),
+                        Span::raw("  "),
+                        Span::styled(format!("(branch: {})", a.branch), Style::default().fg(Color::Rgb(100, 100, 120))),
+                    ]),
+                ])
+            }).collect();
+
+            (list_items, format!(" Installed Flatpak Applications ({}) — [d] Uninstall App ", app.installed_flatpaks.len()))
+        }
+    };
+
+    let title_color = match app.installed_source {
+        InstalledSource::System => Color::Rgb(100, 160, 255),
+        InstalledSource::Flatpak => Color::Rgb(0, 180, 180),
+    };
+
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(Color::Rgb(100, 160, 255)))),
+                .title(Span::styled(title_text, Style::default().fg(title_color))),
         )
         .highlight_style(
             Style::default()
@@ -323,7 +418,19 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_symbol("▸ ");
 
-    f.render_stateful_widget(list, area, &mut app.list_state);
+    f.render_stateful_widget(list, chunks[0], &mut app.list_state);
+
+    // Render footer source switcher help
+    let source_label = match app.installed_source {
+        InstalledSource::System => "AUR/Pacman",
+        InstalledSource::Flatpak => "Flatpak",
+    };
+    let helper_text = Line::from(vec![
+        Span::styled(" [t] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+        Span::raw(format!("Source: {} (Press t to toggle)", source_label)),
+    ]);
+    let helper = Paragraph::new(helper_text);
+    f.render_widget(helper, chunks[1]);
 }
 
 fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
@@ -332,6 +439,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([
             Constraint::Length(3), // Search Input
             Constraint::Min(0),    // Results
+            Constraint::Length(1), // Source indicator
         ])
         .split(area);
 
@@ -340,12 +448,17 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         InputMode::Editing => Style::default().fg(Color::Rgb(255, 220, 80)),
     };
 
+    let source_title = match app.search_source {
+        SearchSource::Aur => "Search AUR/Pacman",
+        SearchSource::Flatpak => "Search Flathub (Flatpak)",
+    };
+
     let search_text = app.search_input.value();
     let input = Paragraph::new(search_text).style(input_style).block(
         Block::default()
             .borders(Borders::ALL)
             .title(Span::styled(
-                " 🔍 Search AUR (/ to edit, Enter to search, Esc to cancel) ",
+                format!(" 🔍 {} (/ to edit, Enter to search, Esc to cancel) ", source_title),
                 Style::default().fg(Color::Rgb(200, 180, 255)),
             )),
     );
@@ -359,7 +472,18 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    if app.search_results.is_empty() {
+    // Check if flatpak source is selected but flatpak is not available
+    if app.search_source == SearchSource::Flatpak && !app.flatpak_available {
+        draw_flatpak_missing_warning(f, chunks[1]);
+        return;
+    }
+
+    let is_results_empty = match app.search_source {
+        SearchSource::Aur => app.search_results.is_empty(),
+        SearchSource::Flatpak => app.flatpak_search_results.is_empty(),
+    };
+
+    if is_results_empty {
         let msg = if app.is_loading {
             format!("  {} Searching...", app.spinner_char())
         } else {
@@ -373,66 +497,91 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
             )
             .style(Style::default().fg(Color::Rgb(140, 140, 160)));
         f.render_widget(paragraph, chunks[1]);
-        return;
+    } else {
+        let (items, title_text, title_color) = match app.search_source {
+            SearchSource::Aur => {
+                let list_items: Vec<ListItem> = app.search_results.iter().map(|p| {
+                    let is_selected = app.selected_packages.contains(&p.name);
+                    let select_marker = if is_selected {
+                        Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
+                    } else {
+                        Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
+                    };
+
+                    let mut lines = vec![Line::from(vec![
+                        select_marker,
+                        Span::styled(format!("{:<25}", p.name), Style::default().fg(Color::Rgb(200, 130, 255)).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("v{}", p.version), Style::default().fg(Color::Rgb(180, 180, 200))),
+                        Span::raw("  "),
+                        Span::styled(format!("⬆{}", p.votes), Style::default().fg(Color::Rgb(100, 220, 100))),
+                        Span::raw("  "),
+                        Span::styled(format!("★{:.2}", p.popularity), Style::default().fg(Color::Rgb(255, 200, 80))),
+                    ])];
+                    if let Some(ref desc) = p.description {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("       {}", desc.chars().take(80).collect::<String>()), Style::default().fg(Color::Rgb(140, 140, 160))),
+                        ]));
+                    }
+                    ListItem::new(lines)
+                }).collect();
+
+                let selected_count = app.selected_packages.len();
+                let title = if selected_count > 0 {
+                    format!(" AUR/Pacman Results ({}) — Selected {} — [Space] Select  [Enter] Install Selected  [s] Scan ", app.search_results.len(), selected_count)
+                } else {
+                    format!(" AUR/Pacman Results ({}) — [Space] Select  [Enter] Install Selected  [s] Scan ", app.search_results.len())
+                };
+
+                (list_items, title, Color::Rgb(200, 130, 255))
+            }
+            SearchSource::Flatpak => {
+                let list_items: Vec<ListItem> = app.flatpak_search_results.iter().map(|a| {
+                    let mut lines = vec![
+                        Line::from(vec![
+                            Span::styled(format!("{:<25}", a.name), Style::default().fg(Color::Rgb(0, 200, 180)).add_modifier(Modifier::BOLD)),
+                            Span::raw("  "),
+                            Span::styled(&a.app_id, Style::default().fg(Color::Rgb(120, 120, 140))),
+                        ])
+                    ];
+                    if let Some(ref summary) = a.summary {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("       {}", summary.chars().take(80).collect::<String>()), Style::default().fg(Color::Rgb(140, 140, 160))),
+                        ]));
+                    }
+                    ListItem::new(lines)
+                }).collect();
+
+                (list_items, format!(" Flathub Results ({}) — [Enter] Install App ", app.flatpak_search_results.len()), Color::Rgb(0, 180, 180))
+            }
+        };
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled(title_text, Style::default().fg(title_color))),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(40, 45, 60))
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▸ ");
+
+        f.render_stateful_widget(list, chunks[1], &mut app.list_state);
     }
 
-    let items: Vec<ListItem> = app
-        .search_results
-        .iter()
-        .map(|p| {
-            let is_selected = app.selected_packages.contains(&p.name);
-            let select_marker = if is_selected {
-                Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
-            } else {
-                Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
-            };
-
-            let mut lines = vec![Line::from(vec![
-                select_marker,
-                Span::styled(
-                    format!("{:<25}", p.name),
-                    Style::default()
-                        .fg(Color::Rgb(200, 130, 255))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("v{}", p.version), Style::default().fg(Color::Rgb(180, 180, 200))),
-                Span::raw("  "),
-                Span::styled(format!("⬆{}", p.votes), Style::default().fg(Color::Rgb(100, 220, 100))),
-                Span::raw("  "),
-                Span::styled(format!("★{:.2}", p.popularity), Style::default().fg(Color::Rgb(255, 200, 80))),
-            ])];
-            if let Some(ref desc) = p.description {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("       {}", desc.chars().take(80).collect::<String>()),
-                        Style::default().fg(Color::Rgb(140, 140, 160)),
-                    ),
-                ]));
-            }
-            ListItem::new(lines)
-        })
-        .collect();
-
-    let selected_count = app.selected_packages.len();
-    let title = if selected_count > 0 {
-        format!(" Results ({}) — Selected {} — [Space] Select  [Enter] Install Selected  [s] Scan ", app.search_results.len(), selected_count)
-    } else {
-        format!(" Results ({}) — [Space] Select  [Enter] Install Selected  [s] Scan ", app.search_results.len())
+    // Render footer source switcher help
+    let source_label = match app.search_source {
+        SearchSource::Aur => "AUR/Pacman",
+        SearchSource::Flatpak => "Flathub (Flatpak)",
     };
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(Color::Rgb(200, 130, 255)))),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(40, 45, 60))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▸ ");
-
-    f.render_stateful_widget(list, chunks[1], &mut app.list_state);
+    let helper_text = Line::from(vec![
+        Span::styled(" [t] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+        Span::raw(format!("Search Source: {} (Press t to toggle)", source_label)),
+    ]);
+    let helper = Paragraph::new(helper_text);
+    f.render_widget(helper, chunks[2]);
 }
 
 fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {

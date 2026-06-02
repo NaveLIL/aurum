@@ -60,21 +60,11 @@ pub struct Vulnerability {
     pub line_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScanResult {
     pub package_name: String,
     pub score: u8,
     pub vulnerabilities: Vec<Vulnerability>,
-}
-
-impl Default for ScanResult {
-    fn default() -> Self {
-        Self {
-            package_name: String::new(),
-            score: 0,
-            vulnerabilities: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,8 +9,8 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 pub fn highlight_pkgbuild(content: &str) -> Vec<Line<'static>> {
-    let ps = SYNTAX_SET.get_or_init(|| SyntaxSet::load_defaults_newlines());
-    let ts = THEME_SET.get_or_init(|| ThemeSet::load_defaults());
+    let ps = SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines);
+    let ts = THEME_SET.get_or_init(ThemeSet::load_defaults);
 
     let syntax = ps.find_syntax_by_extension("sh")
         .unwrap_or_else(|| ps.find_syntax_plain_text());
@@ -23,7 +23,7 @@ pub fn highlight_pkgbuild(content: &str) -> Vec<Line<'static>> {
     for (line_idx, line) in content.lines().enumerate() {
         // syntect HighlightLines expects newline terminated strings
         let line_with_nl = format!("{}\n", line);
-        let ranges: Vec<(SyntectStyle, &str)> = match h.highlight_line(&line_with_nl, &ps) {
+        let ranges: Vec<(SyntectStyle, &str)> = match h.highlight_line(&line_with_nl, ps) {
             Ok(r) => r,
             Err(_) => vec![(SyntectStyle::default(), line)],
         };
