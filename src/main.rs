@@ -61,7 +61,21 @@ fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_availab
             }
         });
 
-        let _ = tokio::join!(t1, t2, t3, t4);
+        let tx5 = tx.clone();
+        let t5 = tokio::spawn(async move {
+            if let Ok(stats) = backend::paru::Paru::get_disk_stats().await {
+                tx5.send(Action::SetDiskStats(stats)).ok();
+            }
+        });
+
+        let tx6 = tx.clone();
+        let t6 = tokio::spawn(async move {
+            if let Ok(info) = backend::paru::Paru::get_system_info().await {
+                tx6.send(Action::SetSystemInfo(info)).ok();
+            }
+        });
+
+        let _ = tokio::join!(t1, t2, t3, t4, t5, t6);
         tx.send(Action::SetStatus("Ready".to_string())).ok();
     });
 }
@@ -82,6 +96,11 @@ use std::sync::atomic::AtomicBool;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        return handle_cli(args).await;
+    }
+
     // Setup panic hook to restore terminal
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -166,7 +185,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-        let _ = tokio::join!(t1, t2, t3, t4, t5, t6);
+        let tx7 = tx_load.clone();
+        let t7 = tokio::spawn(async move {
+            match backend::paru::Paru::get_disk_stats().await {
+                Ok(stats) => { tx7.send(Action::SetDiskStats(stats)).ok(); }
+                Err(e) => { tx7.send(Action::Error(format!("Failed to load disk stats: {}", e))).ok(); }
+            }
+        });
+
+        let tx8 = tx_load.clone();
+        let t8 = tokio::spawn(async move {
+            match backend::paru::Paru::get_system_info().await {
+                Ok(info) => { tx8.send(Action::SetSystemInfo(info)).ok(); }
+                Err(e) => { tx8.send(Action::Error(format!("Failed to load system info: {}", e))).ok(); }
+            }
+        });
+
+        let _ = tokio::join!(t1, t2, t3, t4, t5, t6, t7, t8);
         tx_load.send(Action::SetStatus("Ready".to_string())).ok();
     });
 
@@ -677,14 +712,431 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     spawn_refresh(tx.clone(), app.flatpak_available);
                 }
-                // Key handling
+                Action::SetDiskStats(stats) => {
+                    app.disk_stats = stats;
+                }
+                Action::SetSystemInfo(info) => {
+                    app.system_info = info;
+                }
+                Action::SystemUpgrade { use_snapper } => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    let mut pre_num = String::new();
+                    let mut snapper_success = false;
+
+                    if use_snapper {
+                        println!("\n🔨 Creating Btrfs pre-upgrade snapshot (snapper)...");
+                        let snapper_out = std::process::Command::new("sudo")
+                            .args(["snapper", "-c", "root", "create", "--type", "pre", "--print-number", "--description", "Before Aurum System Upgrade"])
+                            .output();
+                        match snapper_out {
+                            Ok(out) if out.status.success() => {
+                                pre_num = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                println!("✅ Pre-upgrade snapshot created (ID: {}).", pre_num);
+                                snapper_success = true;
+                            }
+                            Ok(out) => {
+                                println!("⚠️  Failed to create snapper snapshot: {}", String::from_utf8_lossy(&out.stderr));
+                            }
+                            Err(e) => {
+                                println!("⚠️  Failed to execute snapper: {}", e);
+                            }
+                        }
+                    }
+
+                    println!("\n>>> paru -Syu\n");
+                    let status = std::process::Command::new("paru")
+                        .args(["-Syu"])
+                        .status();
+
+                    let upgrade_success = match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ System upgrade completed successfully.");
+                            true
+                        }
+                        Ok(s) => {
+                            println!("\n⚠️ Upgrade command exited with code: {}.", s.code().unwrap_or(-1));
+                            false
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run upgrade: {}.", e);
+                            false
+                        }
+                    };
+
+                    if upgrade_success && snapper_success && !pre_num.is_empty() {
+                        println!("\n🔨 Creating Btrfs post-upgrade snapshot (snapper)...");
+                        let snapper_post = std::process::Command::new("sudo")
+                            .args(["snapper", "-c", "root", "create", "--type", "post", "--pre-number", &pre_num, "--description", "After Aurum System Upgrade"])
+                            .status();
+                        match snapper_post {
+                            Ok(s) if s.success() => {
+                                println!("✅ Post-upgrade snapshot created.");
+                            }
+                            _ => {
+                                println!("⚠️  Failed to create post-upgrade snapshot.");
+                            }
+                        }
+                    }
+
+                    println!("\nPress Enter to return...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::TroubleshootFixKeyring => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n🔨 Fixing Arch Keyring and Signatures...");
+                    println!(">>> sudo pacman -Sy archlinux-keyring && sudo pacman-key --refresh-keys\n");
+
+                    let s1 = std::process::Command::new("sudo")
+                        .args(["pacman", "-Sy", "archlinux-keyring"])
+                        .status();
+
+                    if let Ok(s) = s1 {
+                        if s.success() {
+                            let _ = std::process::Command::new("sudo")
+                                .args(["pacman-key", "--refresh-keys"])
+                                .status();
+                            println!("\n✅ Keyring and keys updated. Press Enter to return...");
+                        } else {
+                            println!("\n⚠️  Keyring package update failed. Press Enter to return...");
+                        }
+                    } else {
+                        println!("\n❌ Failed to run pacman command. Press Enter to return...");
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::TroubleshootResetKeys => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n🔨 Re-initializing Pacman Keys...");
+                    println!(">>> sudo pacman-key --init && sudo pacman-key --populate archlinux\n");
+
+                    let s1 = std::process::Command::new("sudo")
+                        .args(["pacman-key", "--init"])
+                        .status();
+
+                    if let Ok(s) = s1 {
+                        if s.success() {
+                            let _ = std::process::Command::new("sudo")
+                                .args(["pacman-key", "--populate", "archlinux"])
+                                .status();
+                            println!("\n✅ Keys re-initialized. Press Enter to return...");
+                        } else {
+                            println!("\n⚠️  pacman-key --init failed. Press Enter to return...");
+                        }
+                    } else {
+                        println!("\n❌ Failed to run pacman-key command. Press Enter to return...");
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::TroubleshootRemoveLock => {
+                    let lock_path = std::path::Path::new("/var/lib/pacman/db.lck");
+                    if lock_path.exists() {
+                        let tx_ref = tx.clone();
+                        tokio::spawn(async move {
+                            let status = tokio::process::Command::new("sudo")
+                                .args(["rm", "-f", "/var/lib/pacman/db.lck"])
+                                .status()
+                                .await;
+                            match status {
+                                Ok(s) if s.success() => {
+                                    tx_ref.send(Action::SetStatus("✅ pacman database unlocked".to_string())).ok();
+                                }
+                                _ => {
+                                    tx_ref.send(Action::Error("❌ Failed to unlock pacman database (sudo failed)".to_string())).ok();
+                                }
+                            }
+                        });
+                    }
+                }
+                Action::TroubleshootUpdateMirrors => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n⚡ Updating Arch Linux mirrorlist using Reflector...");
+                    println!(">>> sudo reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist && sudo pacman -Sy\n");
+
+                    let s1 = std::process::Command::new("sudo")
+                        .args(["reflector", "--latest", "20", "--protocol", "https", "--sort", "rate", "--save", "/etc/pacman.d/mirrorlist"])
+                        .status();
+
+                    if let Ok(s) = s1 {
+                        if s.success() {
+                            println!("\n✅ Mirrorlist updated successfully. Refreshing pacman databases...");
+                            let s2 = std::process::Command::new("sudo")
+                                .args(["pacman", "-Sy"])
+                                .status();
+                            if let Ok(s) = s2 {
+                                if s.success() {
+                                    println!("\n✅ Databases synchronized. Press Enter to return...");
+                                } else {
+                                    println!("\n⚠️  pacman database synchronization failed. Press Enter to return...");
+                                }
+                            } else {
+                                println!("\n❌ Failed to run pacman command. Press Enter to return...");
+                            }
+                        } else {
+                            println!("\n⚠️  reflector failed to update mirrorlist. Press Enter to return...");
+                        }
+                    } else {
+                        println!("\n❌ Failed to run reflector command. Press Enter to return...");
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::TroubleshootInstallLtsKernel => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    let (kernel_pkg, headers_pkg) = if app.system_info.cachyos_kernel_installed {
+                        ("linux-cachyos-lts", "linux-cachyos-lts-headers")
+                    } else {
+                        ("linux-lts", "linux-lts-headers")
+                    };
+
+                    println!("\n🛡️ Installing Backup LTS Kernel & Headers for safety...");
+                    println!(">>> paru -S {} {}\n", kernel_pkg, headers_pkg);
+
+                    let status = std::process::Command::new("paru")
+                        .args(["-S", kernel_pkg, headers_pkg])
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ LTS Kernel and Headers installed successfully. Press Enter to return...");
+                        }
+                        _ => {
+                            println!("\n⚠️ Installation failed or was cancelled. Press Enter to return...");
+                        }
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::CleanPacmanCache(all) => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    let _ = std::process::Command::new("sudo")
+                        .args(["sh", "-c", "rm -rf /var/cache/pacman/pkg/download-*"])
+                        .status();
+
+                    let status = if all {
+                        println!("\n>>> sudo pacman -Sc\n");
+                        std::process::Command::new("sudo")
+                            .arg("pacman")
+                            .arg("-Sc")
+                            .status()
+                    } else {
+                        println!("\n>>> sudo paccache -r\n");
+                        std::process::Command::new("sudo")
+                            .arg("paccache")
+                            .arg("-r")
+                            .status()
+                    };
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Pacman cache cleaned. Press Enter to return...");
+                        }
+                        Ok(s) => {
+                            println!("\n⚠ Command exited with code: {}. Press Enter to return...", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run command: {}. Press Enter to return...", e);
+                        }
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::CleanFlatpakUnused => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n>>> flatpak uninstall --unused\n");
+                    let status = std::process::Command::new("flatpak")
+                        .arg("uninstall")
+                        .arg("--unused")
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Unused Flatpak runtimes removed. Press Enter to return...");
+                        }
+                        Ok(s) => {
+                            println!("\n⚠ flatpak exited with code: {}. Press Enter to return...", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run flatpak: {}. Press Enter to return...", e);
+                        }
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::ToggleHelp => {
+                    app.show_help = !app.show_help;
+                }
                 Action::Key(mut key) => {
                     if app.input_mode != app::InputMode::Editing {
                         if let KeyCode::Char(c) = key.code {
                             key.code = KeyCode::Char(translate_cyrillic(c));
                         }
                     }
-                    if app.route == app::Route::DiffViewer {
+                    if app.show_help {
+                        app.show_help = false;
+                    } else if app.route == app::Route::DiffViewer {
                         match key.code {
                             KeyCode::Char('j') | KeyCode::Down => {
                                 if app.pkgbuild_scroll + 1 < app.pkgbuild_lines.len() {
@@ -716,6 +1168,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app::InputMode::Normal => match key.code {
                                 KeyCode::Char('q') => {
                                     app.running = false;
+                                }
+                                KeyCode::Char('?') => {
+                                    tx.send(Action::ToggleHelp).ok();
                                 }
                                 KeyCode::Char('j') | KeyCode::Down => {
                                     if app.route == app::Route::Store {
@@ -1027,14 +1482,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                // Update all
+                                // Update all / Full System Upgrade
                                 KeyCode::Char('U') => {
                                     if app.route == app::Route::Updates && !app.updates.is_empty() {
+                                        if app.system_info.snapper_available {
+                                            tx.send(Action::ShowConfirm(
+                                                "Create Btrfs snapper snapshot and perform full system upgrade?".to_string(),
+                                                Box::new(Action::SystemUpgrade { use_snapper: true }),
+                                            )).ok();
+                                        } else {
+                                            tx.send(Action::ShowConfirm(
+                                                "Perform full system upgrade (paru -Syu)?".to_string(),
+                                                Box::new(Action::SystemUpgrade { use_snapper: false }),
+                                            )).ok();
+                                        }
+                                    }
+                                }
+                                // Troubleshooting keys
+                                KeyCode::Char('K') => {
+                                    tx.send(Action::ShowConfirm(
+                                        "Fix Arch keyring and refresh signature keys?".to_string(),
+                                        Box::new(Action::TroubleshootFixKeyring),
+                                    )).ok();
+                                }
+                                KeyCode::Char('L') => {
+                                    if app.system_info.pacman_lock_exists {
                                         tx.send(Action::ShowConfirm(
-                                            format!("Update all {} packages?", app.updates.len()),
-                                            Box::new(Action::UpdateAll),
+                                            "Force unlock pacman database (delete db.lck)?".to_string(),
+                                            Box::new(Action::TroubleshootRemoveLock),
                                         )).ok();
                                     }
+                                }
+                                KeyCode::Char('R') => {
+                                    tx.send(Action::ShowConfirm(
+                                        "Re-initialize and populate pacman keyring (Reset Keys)?".to_string(),
+                                        Box::new(Action::TroubleshootResetKeys),
+                                    )).ok();
+                                }
+                                KeyCode::Char('M') => {
+                                    tx.send(Action::ShowConfirm(
+                                        "Update fast mirrors list using Reflector? (requires sudo)".to_string(),
+                                        Box::new(Action::TroubleshootUpdateMirrors),
+                                    )).ok();
+                                }
+                                KeyCode::Char('B') => {
+                                    let (kernel, _) = if app.system_info.cachyos_kernel_installed {
+                                        ("linux-cachyos-lts", "linux-cachyos-lts-headers")
+                                    } else {
+                                        ("linux-lts", "linux-lts-headers")
+                                    };
+                                    tx.send(Action::ShowConfirm(
+                                        format!("Install safety backup LTS kernel and headers ({})?", kernel),
+                                        Box::new(Action::TroubleshootInstallLtsKernel),
+                                    )).ok();
                                 }
                                 // Cache: delete selected / remove selected orphan package
                                 KeyCode::Char('d') => {
@@ -1089,8 +1589,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
+                                KeyCode::Char('c') => {
+                                    if app.route == app::Route::Cache {
+                                        tx.send(Action::ShowConfirm(
+                                            "Clean old pacman cache (keep latest 3 versions)?".to_string(),
+                                            Box::new(Action::CleanPacmanCache(false)),
+                                        )).ok();
+                                    }
+                                }
+                                KeyCode::Char('C') => {
+                                    if app.route == app::Route::Cache {
+                                        tx.send(Action::ShowConfirm(
+                                            "Clean ALL unused pacman cache files?".to_string(),
+                                            Box::new(Action::CleanPacmanCache(true)),
+                                        )).ok();
+                                    }
+                                }
                                 KeyCode::Char('f') | KeyCode::Char('F') => {
-                                    if !app.flatpak_available && (
+                                    if app.route == app::Route::Cache {
+                                        if app.flatpak_available {
+                                            tx.send(Action::ShowConfirm(
+                                                "Remove unused Flatpak runtimes?".to_string(),
+                                                Box::new(Action::CleanFlatpakUnused),
+                                            )).ok();
+                                        }
+                                    } else if !app.flatpak_available && (
                                         (app.route == app::Route::Search && app.search_source == app::SearchSource::Flatpak) ||
                                         (app.route == app::Route::Installed && app.installed_source == app::InstalledSource::Flatpak)
                                     ) {
@@ -1189,4 +1712,124 @@ mod tests {
         assert_eq!(translate_cyrillic('1'), '1');
         assert_eq!(translate_cyrillic('['), '[');
     }
+}
+
+async fn handle_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let cmd = args[1].as_str();
+    if cmd == "install" || cmd == "i" {
+        if args.len() < 3 {
+            println!("⚠️ Error: Please specify a package name, file path, or directory containing a PKGBUILD.");
+            println!("Usage: aurum install <package | file | directory>");
+            std::process::exit(1);
+        }
+
+        let targets = &args[2..];
+        
+        // If there's only one target, it might be a file or a PKGBUILD directory
+        if targets.len() == 1 {
+            let target = &targets[0];
+            let path = std::path::Path::new(target);
+            
+            if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "zst" || ext == "xz" {
+                    println!("📦 Detected local Arch package archive: {}", target);
+                    println!(">>> sudo pacman -U {}", target);
+                    let status = std::process::Command::new("sudo")
+                        .args(["pacman", "-U", target])
+                        .status()?;
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                    return Ok(());
+                }
+            } else if path.is_dir() {
+                if path.join("PKGBUILD").exists() {
+                    println!("🛠️ Detected PKGBUILD source directory: {}", target);
+                    
+                    // Safety check: makepkg cannot run as root
+                    let is_root = std::process::Command::new("id")
+                        .arg("-u")
+                        .output()
+                        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+                        .unwrap_or(false);
+                        
+                    if is_root {
+                        println!("\n❌ Error: You are running aurum as root/sudo.");
+                        println!("Building Arch packages (makepkg) as root is not allowed for security reasons.");
+                        println!("Please run this command without sudo:");
+                        println!("  aurum install {}", target);
+                        println!("Aurum will request password escalation automatically during installation.");
+                        std::process::exit(1);
+                    }
+                    
+                    println!(">>> makepkg -si (inside {})", target);
+                    let status = std::process::Command::new("makepkg")
+                        .args(["-si"])
+                        .current_dir(path)
+                        .status()?;
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                    return Ok(());
+                } else {
+                    println!("⚠️ Error: Directory '{}' does not contain a PKGBUILD file.", target);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        // Default to paru installation for package names
+        println!("🔍 Installing packages via paru: {}", targets.join(" "));
+        println!(">>> paru -S {}", targets.join(" "));
+        let status = std::process::Command::new("paru")
+            .arg("-S")
+            .args(targets)
+            .status()?;
+            
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        Ok(())
+    } else if cmd == "remove" || cmd == "r" {
+        if args.len() < 3 {
+            println!("⚠️ Error: Please specify a package name to remove.");
+            println!("Usage: aurum remove <package1 package2 ...>");
+            std::process::exit(1);
+        }
+
+        let targets = &args[2..];
+        println!("🗑️ Removing packages via paru: {}", targets.join(" "));
+        println!(">>> paru -Rns {}", targets.join(" "));
+        let status = std::process::Command::new("paru")
+            .arg("-Rns")
+            .args(targets)
+            .status()?;
+            
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        Ok(())
+    } else if cmd == "--help" || cmd == "-h" || cmd == "help" {
+        print_usage();
+        Ok(())
+    } else {
+        println!("⚠️ Unknown command: {}", cmd);
+        print_usage();
+        std::process::exit(1);
+    }
+}
+
+fn print_usage() {
+    println!("Aurum — Smart Package Manager and TUI for CachyOS / Arch Linux\n");
+    println!("Usage:");
+    println!("  aurum                      Launch the TUI Dashboard");
+    println!("  aurum install [target]     Install packages, files, or PKGBUILD directories");
+    println!("  aurum remove [packages]    Remove packages and their unused dependencies");
+    println!("  aurum help, -h, --help     Show this help message\n");
+    println!("Examples:");
+    println!("  aurum install telegram-desktop          Install from official repositories or AUR");
+    println!("  aurum install ./some-package.pkg.tar.zst Install a local package archive");
+    println!("  aurum install ./local-pkgbuild-folder/  Build and install a package from source");
+    println!("  aurum remove vlc                        Remove VLC and its unused dependencies");
 }

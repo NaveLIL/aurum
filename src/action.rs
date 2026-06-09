@@ -1,4 +1,4 @@
-use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry};
+use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry, DiskStats, SystemInfo};
 use crate::backend::flatpak::{FlatpakApp, FlatpakSearchApp};
 
 #[allow(dead_code)]
@@ -49,4 +49,18 @@ pub enum Action {
     InstallFlatpakTool,
     InstallFlatpakApp(String),
     RemoveFlatpakApp(String),
+    // Disk Stats and Cleaners
+    SetDiskStats(DiskStats),
+    CleanPacmanCache(bool),
+    CleanFlatpakUnused,
+    ToggleHelp,
+    // System Upgrade and Troubleshoot
+    SetSystemInfo(SystemInfo),
+    SystemUpgrade { use_snapper: bool },
+    TroubleshootFixKeyring,
+    TroubleshootResetKeys,
+    TroubleshootRemoveLock,
+    TroubleshootUpdateMirrors,
+    TroubleshootInstallLtsKernel,
 }
+

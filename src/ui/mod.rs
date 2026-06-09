@@ -26,6 +26,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.confirm_dialog.is_some() {
         draw_confirm_dialog(f, app);
     }
+
+    // Draw help modal on top if present
+    if app.show_help {
+        draw_help_modal(f, app);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
@@ -76,14 +81,13 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         _ => draw_placeholder(f, area),
     }
 }
-
 fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // Left: Status
+    // Left: Status & Recent News
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -91,8 +95,7 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
 
     let status_block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" ⚡ Status ", Style::default().fg(Color::Rgb(80, 180, 255))))
-        .style(Style::default());
+        .title(Span::styled(" ⚡ Status ", Style::default().fg(Color::Rgb(80, 180, 255))));
 
     let updates_count = app.updates.len();
     let installed_count = app.installed_packages.len();
@@ -158,65 +161,146 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     let news_para = Paragraph::new(news_text).block(news_block);
     f.render_widget(news_para, left_chunks[1]);
 
-    // Right: Quick Help
+    // Right: System Health (Top) & Keyboard Quick Help (Bottom)
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(11), // System Health & Upgrade Alert
+            Constraint::Min(0),     // Keyboard Help
+        ])
+        .split(chunks[1]);
+
+    let health_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" 🩺 System Health ", Style::default().fg(Color::Rgb(100, 220, 100))));
+
+    let mut health_lines = Vec::new();
+    health_lines.push(Line::from(""));
+
+    let days = app.system_info.last_upgrade_days;
+    let age_style = if days > 14 {
+        Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD)
+    } else if days > 7 {
+        Style::default().fg(Color::Rgb(255, 200, 80))
+    } else {
+        Style::default().fg(Color::Rgb(100, 220, 100))
+    };
+
+    health_lines.push(Line::from(vec![
+        Span::raw("  Last Upgrade:  "),
+        Span::styled(
+            if days == 0 { "Today".to_string() } else { format!("{} days ago", days) },
+            age_style,
+        ),
+    ]));
+
+    if app.system_info.pacman_lock_exists {
+        health_lines.push(Line::from(vec![
+            Span::styled("  ⚠️  Database Lock Active!", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+        ]));
+    } else {
+        health_lines.push(Line::from(vec![
+            Span::raw("  Database Lock: "),
+            Span::styled("None", Style::default().fg(Color::Rgb(100, 220, 100))),
+        ]));
+    }
+
+    health_lines.push(Line::from(vec![
+        Span::raw("  Btrfs Snapper: "),
+        Span::styled(
+            if app.system_info.snapper_available { "Configured & Active (root)" } else { "Not Available" },
+            Style::default().fg(if app.system_info.snapper_available { Color::Rgb(100, 220, 100) } else { Color::Rgb(140, 140, 160) }),
+        ),
+    ]));
+
+    let has_lts = app.system_info.lts_kernel_installed;
+    let multiple_kernels = app.system_info.multiple_kernels_installed;
+    health_lines.push(Line::from(vec![
+        Span::raw("  Backup Kernel: "),
+        if has_lts {
+            Span::styled("Configured (LTS)", Style::default().fg(Color::Rgb(100, 220, 100)))
+        } else if multiple_kernels {
+            Span::styled("Configured (Multiple)", Style::default().fg(Color::Rgb(255, 200, 80)))
+        } else {
+            Span::styled("⚠️ None (Press Shift-B to fix)", Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD))
+        }
+    ]));
+
+    let pacman_cache = app.disk_stats.pacman_cache_bytes;
+    let cache_limit = 5 * 1024 * 1024 * 1024; // 5 GB
+    health_lines.push(Line::from(vec![
+        Span::raw("  Pacman Cache:  "),
+        if pacman_cache > cache_limit {
+            Span::styled(format!("⚠️ {} (Large)", format_size(pacman_cache)), Style::default().fg(Color::Rgb(255, 120, 50)).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(format_size(pacman_cache), Style::default().fg(Color::Rgb(100, 220, 100)))
+        }
+    ]));
+
+    let free_space = app.disk_stats.root_free_bytes;
+    let space_limit = 10 * 1024 * 1024 * 1024; // 10 GB
+    if free_space > 0 {
+        health_lines.push(Line::from(vec![
+            Span::raw("  Disk Free:     "),
+            if free_space < space_limit {
+                Span::styled(format!("⚠️ {} (Low!)", format_size(free_space)), Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(format_size(free_space), Style::default().fg(Color::Rgb(100, 220, 100)))
+            }
+        ]));
+    }
+
+    let health_para = Paragraph::new(health_lines).block(health_block);
+    f.render_widget(health_para, right_chunks[0]);
+
     let help_block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" ⌨ Keybindings ", Style::default().fg(Color::Rgb(100, 220, 100))));
+        .title(Span::styled(" ⌨ Quick Help ", Style::default().fg(Color::Rgb(80, 180, 255))));
 
     let help_text = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  j/↓  k/↑", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Navigate list"),
+            Span::styled("  Tab / [/] ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Switch tabs  "),
+            Span::styled("? ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("All Keybindings"),
         ]),
         Line::from(vec![
-            Span::styled("  Tab/S-Tab", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Next/Prev tab"),
+            Span::styled("  j/k / ↑/↓ ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Navigate  "),
+            Span::styled("Enter ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Install/Details"),
         ]),
         Line::from(vec![
-            Span::styled("  1-8      ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Switch to tab 1-8"),
-        ]),
-        Line::from(vec![
-            Span::styled("  [/]      ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Next/Prev tab"),
-        ]),
-        Line::from(vec![
-            Span::styled("  t        ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Toggle AUR/Flatpak"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Enter    ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Install / Details"),
-        ]),
-        Line::from(vec![
-            Span::styled("  u         ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Update selected"),
-        ]),
-        Line::from(vec![
-            Span::styled("  U         ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Update all"),
-        ]),
-        Line::from(vec![
-            Span::styled("  s         ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Security scan"),
+            Span::styled("  u / U     ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Upgrade selected / Full upgrade"),
         ]),
         Line::from(vec![
             Span::styled("  /         ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Search AUR"),
+            Span::raw("Search  "),
+            Span::styled("t ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Toggle AUR/Flatpak"),
         ]),
         Line::from(vec![
-            Span::styled("  d / D     ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Delete cache (one / all)"),
+            Span::styled("  K         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Fix Keyring errors"),
         ]),
         Line::from(vec![
-            Span::styled("  q         ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
-            Span::raw("  Quit"),
+            Span::styled("  L         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Unlock pacman database"),
+        ]),
+        Line::from(vec![
+            Span::styled("  M         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Update mirrors (Reflector)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  B         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Install backup LTS kernel"),
         ]),
     ];
 
     let help_para = Paragraph::new(help_text).block(help_block);
-    f.render_widget(help_para, chunks[1]);
+    f.render_widget(help_para, right_chunks[1]);
 }
 
 fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
@@ -248,14 +332,23 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
             };
 
+            let is_repo = u.repository == "repo";
+            let repo_tag = if is_repo {
+                Span::styled(" [repo] ", Style::default().fg(Color::Rgb(80, 180, 255)))
+            } else {
+                Span::styled(" [aur]  ", Style::default().fg(Color::Rgb(255, 200, 80)))
+            };
+
+            let name_style = if is_repo {
+                Style::default().fg(Color::Rgb(100, 220, 255)).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)
+            };
+
             let content = vec![Line::from(vec![
                 select_marker,
-                Span::styled(
-                    format!("{:<25}", u.name),
-                    Style::default()
-                        .fg(Color::Rgb(255, 200, 80))
-                        .add_modifier(Modifier::BOLD),
-                ),
+                repo_tag,
+                Span::styled(format!("{:<25}", u.name), name_style),
                 Span::styled(&u.old_version, Style::default().fg(Color::Rgb(180, 80, 80))),
                 Span::styled(" → ", Style::default().fg(Color::Rgb(140, 140, 160))),
                 Span::styled(&u.new_version, Style::default().fg(Color::Rgb(100, 220, 100))),
@@ -682,14 +775,74 @@ fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_widget(detail, chunks[1]);
 }
-
 fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // Left pane: Cache Manager
+    // Split Left Pane vertically
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8), // Disk usage stats & cleaning actions
+            Constraint::Min(0),    // AUR Clone Cache list
+        ])
+        .split(chunks[0]);
+
+    // System Disk Info
+    let free_str = format_size(app.disk_stats.root_free_bytes);
+    let total_str = format_size(app.disk_stats.root_total_bytes);
+    let used_bytes = app.disk_stats.root_total_bytes.saturating_sub(app.disk_stats.root_free_bytes);
+    let used_percent = if app.disk_stats.root_total_bytes > 0 {
+        (used_bytes as f64 / app.disk_stats.root_total_bytes as f64 * 100.0) as u8
+    } else {
+        0
+    };
+
+    // Construct a text progress bar for disk usage
+    let bar_width = 15;
+    let filled = ((used_percent as f64 / 100.0) * bar_width as f64) as usize;
+    let bar = format!(
+        "[{}{}] {}%",
+        "■".repeat(filled),
+        " ".repeat(bar_width - filled),
+        used_percent
+    );
+
+    let disk_text = vec![
+        Line::from(vec![
+            Span::styled("  Root Partition: ", Style::default().fg(Color::Rgb(140, 140, 160))),
+            Span::styled(format!("{} free / {} total ", free_str, total_str), Style::default().fg(Color::Rgb(255, 255, 255))),
+            Span::styled(bar, Style::default().fg(if used_percent > 85 { Color::Rgb(255, 100, 100) } else { Color::Rgb(80, 180, 255) })),
+        ]),
+        Line::from(vec![
+            Span::styled("  Pacman Cache:   ", Style::default().fg(Color::Rgb(140, 140, 160))),
+            Span::styled(format_size(app.disk_stats.pacman_cache_bytes), Style::default().fg(Color::Rgb(255, 200, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("   Paru Cache: ", Style::default().fg(Color::Rgb(140, 140, 160))),
+            Span::styled(format_size(app.disk_stats.paru_cache_bytes), Style::default().fg(Color::Rgb(255, 200, 100)).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Cleaners: ", Style::default().fg(Color::Rgb(140, 140, 160))),
+            Span::styled(" [c] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("paccache -r  "),
+            Span::styled(" [C] ", Style::default().fg(Color::Rgb(255, 150, 50)).add_modifier(Modifier::BOLD)),
+            Span::raw("pacman -Sc  "),
+            Span::styled(" [f] ", Style::default().fg(Color::Rgb(200, 100, 255)).add_modifier(Modifier::BOLD)),
+            Span::raw("flatpak unused"),
+        ]),
+    ];
+
+    let disk_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+        .title(Span::styled(" 💾 System Disk Usage ", Style::default().fg(Color::Rgb(80, 180, 255))));
+
+    let disk_para = Paragraph::new(disk_text).block(disk_block);
+    f.render_widget(disk_para, left_chunks[0]);
+
+    // Left Pane (lower): Cache Manager
     let cache_border_style = if app.cache_active_pane == 0 {
         Style::default().fg(Color::Rgb(255, 200, 80))
     } else {
@@ -710,7 +863,7 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                     .title(Span::styled(" 🧹 Cache Manager ", Style::default().fg(Color::Rgb(255, 200, 100)))),
             )
             .style(Style::default().fg(Color::Rgb(140, 140, 160)));
-        f.render_widget(paragraph, chunks[0]);
+        f.render_widget(paragraph, left_chunks[1]);
     } else {
         let total_size: u64 = app.cache_entries.iter().map(|c| c.size_bytes).sum();
         let items: Vec<ListItem> = app
@@ -756,7 +909,7 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
         if app.cache_active_pane != 0 {
             list_state.select(None);
         }
-        f.render_stateful_widget(list, chunks[0], &mut list_state);
+        f.render_stateful_widget(list, left_chunks[1], &mut list_state);
     }
 
     // Right pane: Orphans cleaner
@@ -799,8 +952,12 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        &pkg.version,
+                        format!("{:<15}", pkg.version),
                         Style::default().fg(Color::Rgb(140, 140, 160)),
+                    ),
+                    Span::styled(
+                        pkg.size.as_deref().unwrap_or(""),
+                        Style::default().fg(Color::Rgb(255, 200, 100)),
                     ),
                 ])];
                 ListItem::new(content)
@@ -828,7 +985,6 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
         }
         f.render_stateful_widget(list, orphan_chunks[0], &mut orphans_state);
     }
-
     // Help/actions bar for cache / orphans
     let help_text = if app.cache_active_pane == 0 {
         vec![
@@ -1232,4 +1388,127 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
         .title(Span::styled(" Actions ", Style::default().fg(Color::Rgb(140, 140, 160))));
     let help_para = Paragraph::new(Line::from(help_text)).block(help_block);
     f.render_widget(help_para, right_chunks[1]);
+}
+
+fn draw_help_modal(f: &mut Frame, _app: &App) {
+    let area = f.size();
+    // Center the dialog
+    let dialog_width = 76u16.min(area.width.saturating_sub(4));
+    let dialog_height = 27u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(dialog_width)) / 2;
+    let y = (area.height.saturating_sub(dialog_height)) / 2;
+    let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+    f.render_widget(Clear, dialog_area);
+
+    let border_style = Style::default().fg(Color::Rgb(80, 180, 255));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(
+            " ⌨ Keyboard Shortcuts ",
+            Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD),
+        ));
+
+    // Split inside the modal into two horizontal halves (columns)
+    let inner_area = block.inner(dialog_area);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner_area);
+
+    // Left Column: Navigation & Global
+    let left_text = vec![
+        Line::from(Span::styled("── Global & Navigation ────────────────", Style::default().fg(Color::Rgb(100, 100, 120)))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Tab / ]       ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Next Tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Shift-Tab / [ ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Prev Tab"),
+        ]),
+        Line::from(vec![
+            Span::styled("  1 - 8         ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Switch to Tab 1-8"),
+        ]),
+        Line::from(vec![
+            Span::styled("  j / k / ↑ / ↓ ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Navigate List"),
+        ]),
+        Line::from(vec![
+            Span::styled("  h / l / ← / → ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Switch Panes"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc / q       ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Quit / Close"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ?             ", Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD)),
+            Span::raw("Toggle Help Menu"),
+        ]),
+    ];
+
+    // Right Column: Package Operations & Caches
+    let right_text = vec![
+        Line::from(Span::styled("── Actions & Maintenance ─────────────", Style::default().fg(Color::Rgb(100, 100, 120)))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  i             ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Install selected package"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Remove / Clean selected"),
+        ]),
+        Line::from(vec![
+            Span::styled("  D             ", Style::default().fg(Color::Rgb(200, 50, 50)).add_modifier(Modifier::BOLD)),
+            Span::raw("Remove / Clean ALL"),
+        ]),
+        Line::from(vec![
+            Span::styled("  u / U         ", Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD)),
+            Span::raw("Update Selected / All"),
+        ]),
+        Line::from(vec![
+            Span::styled("  c             ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::raw("Paccache -r (keep 3 ver)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  C             ", Style::default().fg(Color::Rgb(255, 150, 50)).add_modifier(Modifier::BOLD)),
+            Span::raw("Pacman -Sc (clean unused)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  f             ", Style::default().fg(Color::Rgb(200, 100, 255)).add_modifier(Modifier::BOLD)),
+            Span::raw("Clean unused Flatpaks"),
+        ]),
+        Line::from(vec![
+            Span::styled("  K             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Fix Keyring errors"),
+        ]),
+        Line::from(vec![
+            Span::styled("  L             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Unlock pacman database"),
+        ]),
+        Line::from(vec![
+            Span::styled("  R             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Reset keys trust database"),
+        ]),
+        Line::from(vec![
+            Span::styled("  M             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Update mirrorlist (Reflector)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  B             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::raw("Install backup LTS kernel"),
+        ]),
+    ];
+
+    let left_para = Paragraph::new(left_text);
+    let right_para = Paragraph::new(right_text);
+
+    f.render_widget(block, dialog_area);
+    f.render_widget(left_para, columns[0]);
+    f.render_widget(right_para, columns[1]);
 }

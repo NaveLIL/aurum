@@ -1,5 +1,5 @@
 use tokio::process::Command;
-use crate::types::{Package, Update, CacheEntry};
+use crate::types::{Package, Update, CacheEntry, DiskStats, SystemInfo};
 use anyhow::{Result, Context};
 use regex::Regex;
 use dirs;
@@ -11,31 +11,49 @@ pub struct Paru;
 
 impl Paru {
     pub async fn get_updates() -> Result<Vec<Update>> {
-        let output = Command::new("paru")
-            .arg("-Qua")
-            .output()
-            .await
-            .context("Failed to execute paru -Qua")?;
-
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
-
-        let stdout = String::from_utf8(output.stdout)?;
         let mut updates = Vec::new();
         let re = UPDATE_RE.get_or_init(|| Regex::new(r"^(\S+)\s+(\S+)\s+->\s+(\S+)").unwrap());
 
-        for line in stdout.lines() {
-            if let Some(caps) = re.captures(line) {
-                updates.push(Update {
-                    name: caps[1].to_string(),
-                    old_version: caps[2].to_string(),
-                    new_version: caps[3].to_string(),
-                    repository: "aur".to_string(),
-                });
+        // 1. Fetch official repo updates via checkupdates
+        match Command::new("checkupdates").output().await {
+            Ok(output) => {
+                if output.status.success() || output.status.code() == Some(2) {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        if let Some(caps) = re.captures(line) {
+                            updates.push(Update {
+                                name: caps[1].to_string(),
+                                old_version: caps[2].to_string(),
+                                new_version: caps[3].to_string(),
+                                repository: "repo".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // checkupdates not installed or failed, fallback to none
             }
         }
 
+        // 2. Fetch AUR updates via paru -Qua
+        if let Ok(output) = Command::new("paru").arg("-Qua").output().await {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(caps) = re.captures(line) {
+                        updates.push(Update {
+                            name: caps[1].to_string(),
+                            old_version: caps[2].to_string(),
+                            new_version: caps[3].to_string(),
+                            repository: "aur".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        updates.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(updates)
     }
 
@@ -64,6 +82,7 @@ impl Paru {
                     out_of_date: None,
                     installed_version: Some(parts[1].to_string()),
                     repository: "aur".to_string(),
+                    size: None,
                 });
             }
         }
@@ -219,24 +238,96 @@ impl Paru {
 
     pub async fn get_orphans() -> Result<Vec<Package>> {
         let output = Command::new("paru")
-            .arg("-Qdt")
+            .arg("-Qdtq")
             .output()
             .await
-            .context("Failed to execute paru -Qdt")?;
+            .context("Failed to execute paru -Qdtq")?;
 
         if !output.status.success() {
             return Ok(Vec::new());
         }
 
         let stdout = String::from_utf8(output.stdout)?;
-        let mut packages = Vec::new();
+        let orphan_names: Vec<String> = stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
 
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
+        let mut packages = Vec::new();
+        if orphan_names.is_empty() {
+            return Ok(packages);
+        }
+
+        // Run pacman -Qi with LC_ALL=C for all orphan packages to get sizes & descriptions in a single call
+        let qi_output = Command::new("pacman")
+            .arg("-Qi")
+            .args(&orphan_names)
+            .env("LC_ALL", "C")
+            .output()
+            .await
+            .context("Failed to run pacman -Qi")?;
+
+        if qi_output.status.success() {
+            let qi_stdout = String::from_utf8_lossy(&qi_output.stdout);
+            let mut current_name = String::new();
+            let mut current_version = String::new();
+            let mut current_size = String::new();
+            let mut current_desc = String::new();
+
+            for line in qi_stdout.lines() {
+                let line_trimmed = line.trim();
+                if line_trimmed.starts_with("Name            :") {
+                    if !current_name.is_empty() {
+                        packages.push(Package {
+                            name: current_name.clone(),
+                            version: current_version.clone(),
+                            description: Some(current_desc.clone()),
+                            maintainer: None,
+                            url: None,
+                            votes: 0,
+                            popularity: 0.0,
+                            last_modified: 0,
+                            out_of_date: None,
+                            installed_version: Some(current_version.clone()),
+                            repository: "orphan".to_string(),
+                            size: Some(current_size.clone()),
+                        });
+                    }
+                    current_name = line_trimmed.split(':').nth(1).unwrap_or("").trim().to_string();
+                    current_version.clear();
+                    current_size.clear();
+                    current_desc.clear();
+                } else if line_trimmed.starts_with("Version         :") {
+                    current_version = line_trimmed.split(':').nth(1).unwrap_or("").trim().to_string();
+                } else if line_trimmed.starts_with("Description     :") {
+                    current_desc = line_trimmed.split(':').nth(1).unwrap_or("").trim().to_string();
+                } else if line_trimmed.starts_with("Installed Size  :") {
+                    current_size = line_trimmed.split(':').nth(1).unwrap_or("").trim().to_string();
+                }
+            }
+            if !current_name.is_empty() {
                 packages.push(Package {
-                    name: parts[0].to_string(),
-                    version: parts[1].to_string(),
+                    name: current_name,
+                    version: current_version.clone(),
+                    description: Some(current_desc),
+                    maintainer: None,
+                    url: None,
+                    votes: 0,
+                    popularity: 0.0,
+                    last_modified: 0,
+                    out_of_date: None,
+                    installed_version: Some(current_version),
+                    repository: "orphan".to_string(),
+                    size: Some(current_size),
+                });
+            }
+        } else {
+            // Fallback to basic list if pacman -Qi fails
+            for name in orphan_names {
+                packages.push(Package {
+                    name,
+                    version: "unknown".to_string(),
                     description: None,
                     maintainer: None,
                     url: None,
@@ -244,30 +335,186 @@ impl Paru {
                     popularity: 0.0,
                     last_modified: 0,
                     out_of_date: None,
-                    installed_version: Some(parts[1].to_string()),
+                    installed_version: Some("unknown".to_string()),
                     repository: "orphan".to_string(),
+                    size: None,
                 });
             }
         }
 
         Ok(packages)
     }
+
+    pub async fn get_disk_stats() -> Result<DiskStats> {
+        let df_output = Command::new("df")
+            .arg("-B1")
+            .arg("--output=avail,size")
+            .arg("/")
+            .env("LC_ALL", "C")
+            .output()
+            .await?;
+
+        let mut free_bytes = 0;
+        let mut total_bytes = 0;
+
+        if df_output.status.success() {
+            let stdout = String::from_utf8_lossy(&df_output.stdout);
+            let lines: Vec<&str> = stdout.lines().collect();
+            if lines.len() >= 2 {
+                let parts: Vec<&str> = lines[1].split_whitespace().collect();
+                if parts.len() >= 2 {
+                    free_bytes = parts[0].parse().unwrap_or(0);
+                    total_bytes = parts[1].parse().unwrap_or(0);
+                }
+            }
+        }
+
+        let pacman_cache = tokio::task::spawn_blocking(move || {
+            let path = std::path::Path::new("/var/cache/pacman/pkg");
+            dir_size_safe(path)
+        }).await.unwrap_or(0);
+
+        let paru_cache = tokio::task::spawn_blocking(move || {
+            let cache_dir = dirs::cache_dir().map(|d| d.join("paru"));
+            cache_dir.map_or(0, |p| dir_size_safe(&p))
+        }).await.unwrap_or(0);
+
+        Ok(DiskStats {
+            root_free_bytes: free_bytes,
+            root_total_bytes: total_bytes,
+            pacman_cache_bytes: pacman_cache,
+            paru_cache_bytes: paru_cache,
+        })
+    }
+
+    pub async fn get_kernel_info() -> Result<(Vec<String>, bool, bool)> {
+        let kernel_list = [
+            "linux",
+            "linux-lts",
+            "linux-zen",
+            "linux-hardened",
+            "linux-rt",
+            "linux-rt-lts",
+            "linux-cachyos",
+            "linux-cachyos-lts",
+            "linux-cachyos-zen",
+            "linux-cachyos-hardened",
+            "linux-cachyos-rt",
+            "linux-cachyos-bore",
+            "linux-cachyos-rc",
+            "linux-cachyos-sched-ext",
+            "linux-cachyos-rc-sched-ext",
+        ];
+
+        let output = Command::new("pacman")
+            .arg("-Qq")
+            .args(&kernel_list)
+            .output()
+            .await;
+
+        let mut installed_kernels = Vec::new();
+        let mut lts_installed = false;
+        let mut cachyos_installed = false;
+
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                let name = line.trim().to_string();
+                if !name.is_empty() {
+                    if name.contains("-lts") {
+                        lts_installed = true;
+                    }
+                    if name.contains("cachyos") {
+                        cachyos_installed = true;
+                    }
+                    installed_kernels.push(name);
+                }
+            }
+        }
+
+        Ok((installed_kernels, lts_installed, cachyos_installed))
+    }
+
+    pub async fn get_system_info() -> Result<SystemInfo> {
+        let mut last_upgrade_days = 0;
+        let pacman_log_path = std::path::Path::new("/var/log/pacman.log");
+
+        if let Ok(metadata) = std::fs::metadata(pacman_log_path) {
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(elapsed) = modified.elapsed() {
+                    last_upgrade_days = (elapsed.as_secs() / (24 * 3600)) as u32;
+                }
+            }
+        }
+
+        let pacman_lock_exists = std::path::Path::new("/var/lib/pacman/db.lck").exists();
+
+        // Check snapper availability and configuration
+        let snapper_available = tokio::task::spawn_blocking(move || {
+            let snapper_exists = std::process::Command::new("which")
+                .arg("snapper")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if !snapper_exists {
+                return false;
+            }
+
+            // check if 'root' config is active in snapper list-configs
+            let output = std::process::Command::new("snapper")
+                .arg("list-configs")
+                .output();
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    return text.contains("root");
+                }
+            }
+            false
+        }).await.unwrap_or(false);
+
+        let (installed_kernels, lts_kernel_installed, cachyos_kernel_installed) = Self::get_kernel_info().await.unwrap_or((Vec::new(), false, false));
+        let multiple_kernels_installed = installed_kernels.len() >= 2;
+
+        Ok(SystemInfo {
+            last_upgrade_days,
+            pacman_lock_exists,
+            snapper_available,
+            lts_kernel_installed,
+            multiple_kernels_installed,
+            cachyos_kernel_installed,
+        })
+    }
 }
 
-fn dir_size(path: &std::path::Path) -> Result<u64> {
+fn dir_size_safe(path: &std::path::Path) -> u64 {
     let mut total: u64 = 0;
     if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let ft = entry.file_type()?;
-            if ft.is_file() {
-                total += entry.metadata()?.len();
-            } else if ft.is_dir() {
-                total += dir_size(&entry.path())?;
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    if let Ok(ft) = entry.file_type() {
+                        if ft.is_file() {
+                            if let Ok(meta) = entry.metadata() {
+                                total += meta.len();
+                            }
+                        } else if ft.is_dir() {
+                            total += dir_size_safe(&entry.path());
+                        }
+                    }
+                }
             }
         }
     }
-    Ok(total)
+    total
+}
+
+fn dir_size(path: &std::path::Path) -> Result<u64> {
+    Ok(dir_size_safe(path))
 }
 
 /// Format bytes into human-readable format
@@ -286,3 +533,4 @@ pub fn format_size(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
+

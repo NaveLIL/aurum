@@ -1,16 +1,32 @@
 # Aurum
 
-Aurum is a lightweight keyboard-driven terminal dashboard for Arch Linux/CachyOS that integrates `paru` with package updates, AUR search, PKGBUILD security scanning, build cache inspection, and Arch news.
+Aurum is a lightweight, keyboard-driven terminal dashboard and package management tool for Arch Linux and CachyOS. It integrates `paru` and `pacman` with system health monitoring, upgrade safety nets, automatic diagnostics, and a smart command-line installer.
 
 ## Features
 
-- **Asynchronous UI**: Built on Tokio and Ratatui. External commands and disk I/O run off the UI thread for smooth terminal interaction.
-- **Paru integration**: View installed packages, available updates, orphaned packages, and install or upgrade directly from the TUI.
-- **PKGBUILD security scanner**: Performs static analysis on PKGBUILD content and flags suspicious patterns like `curl | sh`, `eval`, `base64 -d`, and other risky operations.
-- **Build cache inspection**: Scan `~/.cache/paru/clone`, inspect package build directories, and remove individual or all cached builds.
-- **Application store**: Browse curated Arch/ AUR applications by category, view descriptions, and see installed status in one place.
-- **Arch news feed**: Fetches official Arch Linux news to surface important announcements before package operations.
-- **Clean shell suspension**: Restores the terminal before running external package commands and returns cleanly to the TUI afterwards.
+- **Asynchronous UI**: Built on Tokio and Ratatui. All heavy operations (news fetching, package database queries, disk scans) run on background threads to keep the UI responsive.
+- **Smart CLI Universal Installer**: 
+  - `aurum install <package>`: Installs packages from official repositories or the AUR.
+  - `aurum install <path/to/archive.pkg.tar.zst>`: Automatically installs local package files via `pacman -U`.
+  - `aurum install <path/to/PKGBUILD_dir>`: Automatically runs `makepkg -si` to build and install packages from source directories.
+  - `aurum remove <packages...>`: Cleanly uninstalls packages and their unused dependencies via `paru -Rns`.
+  - *Safety Guard*: Detects and prevents building packages (`makepkg`) as root, guiding the user to run without `sudo`.
+- **Upgrade Safety Net (Snapper)**:
+  - Detects Btrfs `snapper` configurations.
+  - Automatically creates matched atomic `pre` and `post` snapshot restore points before and after running system upgrades (`paru -Syu`).
+- **System Health Diagnostics**:
+  - **LTS Backup Kernel Checker**: Scans for installed LTS kernels. Displays warnings on the Dashboard if no backup kernel is configured to prevent unbootable systems during kernel upgrades.
+  - **LTS Kernel Installer**: Press `Shift-B` to install the appropriate LTS kernel and headers (`linux-cachyos-lts` or `linux-lts` + headers) dynamically matching your active distribution.
+  - **Large Cache Warning**: Flags pacman package cache if it exceeds 5 GB.
+  - **Low Disk Warning**: Alerts the user if root `/` free space drops below 10 GB.
+- **Troubleshooting Toolkit**:
+  - `[K]` Fix Arch Keyring and refresh signature keys (`sudo pacman -Sy archlinux-keyring && sudo pacman-key --refresh-keys`).
+  - `[L]` Remove stale pacman database locks (`/var/lib/pacman/db.lck`).
+  - `[R]` Re-initialize pacman keys database (`sudo pacman-key --init && sudo pacman-key --populate archlinux`).
+  - `[M]` Update mirrorlist dynamically using `reflector` to find the 20 fastest HTTPS mirrors, then sync package databases (`sudo pacman -Sy`).
+- **Layout Independent Hotkeys**: Automatically translates Cyrillic (Russian) keyboard layout inputs to Latin equivalents so all TUI shortcuts work regardless of active keyboard layout.
+- **PKGBUILD Security Scanner**: Statically analyzes package PKGBUILDs to flag risky patterns like `curl | sh`, `eval`, `base64 -d`, and other command injections.
+- **News Feed**: Displays recent Arch Linux news items on the Dashboard, warning you of manual intervention alerts before system upgrades.
 
 ## Installation
 
@@ -19,9 +35,9 @@ Aurum is a lightweight keyboard-driven terminal dashboard for Arch Linux/CachyOS
 - Rust toolchain (`rustc` + `cargo`)
 - `paru`
 - `git`
-- Arch-based distribution or compatible environment
+- Arch-based distribution (Arch, CachyOS, EndeavourOS, etc.)
 
-### Install from repository
+### Install from source
 
 ```bash
 git clone https://github.com/NaveLIL/aurum.git
@@ -29,34 +45,48 @@ cd aurum
 ./install.sh
 ```
 
-The install script builds the release binary, installs it to `~/.local/bin/aurum`, and installs the desktop entry to `~/.local/share/applications/aurum.desktop`.
+The installer builds the release binary, copies it to `~/.local/bin/aurum`, and installs the desktop launcher to `~/.local/share/applications/aurum.desktop`.
 
-Make sure `~/.local/bin` is included in your `PATH`.
+Ensure `~/.local/bin` is in your `PATH`.
 
-## AUR packaging
-
-Aurum includes a `PKGBUILD` and `.SRCINFO` for Arch/ AUR publication. If you want to build the package locally, use:
-
+To build the local package database entry using `makepkg`:
 ```bash
 makepkg -si
 ```
 
-This will build the binary and install the package into the local system package database.
-
-Flatpak support is optional at runtime: install `flatpak` only if you want the Flatpak search and installed-app tabs to work.
-
 ## Usage
 
-- Run `aurum` from a terminal
-- Use `Tab` / `Shift+Tab` to switch tabs
-- Use arrow keys or `j` / `k` to navigate lists
-- Press `/` to search AUR
-- Press `Enter` to view details or install a selected package
-- Press `q` to quit
+### Command Line Interface
+
+```bash
+aurum                                 # Launch TUI dashboard
+aurum install <pkg | file | dir>      # Smart install
+aurum remove <packages...>            # Clean uninstall
+aurum help, -h, --help                # Show usage help
+```
+
+### TUI Navigation
+
+- **Tab / ]** / **Shift-Tab / [**: Switch tabs
+- **1 - 8**: Switch directly to tab 1-8
+- **j / k / Arrow keys**: Navigate lists
+- **/**: Search packages
+- **Enter**: View package details / install
+- **u / U**: Upgrade selected package / Full system upgrade
+- **?**: Toggle keyboard shortcuts modal
+- **Esc / q**: Close modals / Quit
+
+### Troubleshooting Shortcuts (Normal Mode)
+
+- **Shift-K**: Repair GPG Keyrings
+- **Shift-L**: Delete pacman `db.lck` database lock
+- **Shift-R**: Re-initialize and populate pacman key database
+- **Shift-M**: Sort and update fast mirrors list using Reflector
+- **Shift-B**: Install safety backup LTS kernel and headers
 
 ## Configuration
 
-Aurum stores settings in `~/.config/aurum/config.json`. The file is created automatically on first launch.
+Settings are stored in `~/.config/aurum/config.json` (created automatically on first launch).
 
 Example configuration:
 
@@ -76,16 +106,6 @@ Example configuration:
   "theme": "default"
 }
 ```
-
-Add or adjust `risky_patterns` for your own security rules.
-
-## Contributing
-
-1. Fork the repository
-2. Create a branch (`git checkout -b feature/name`)
-3. Commit your changes (`git commit -m 'Add feature'`)
-4. Push your branch (`git push origin feature/name`)
-5. Open a pull request
 
 ## License
 

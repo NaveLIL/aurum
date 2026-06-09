@@ -104,6 +104,7 @@ impl RpcPackage {
             out_of_date: self.out_of_date,
             installed_version: None, // RPC doesn't know local state
             repository: "aur".to_string(),
+            size: None,
         }
     }
 }

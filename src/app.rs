@@ -1,5 +1,5 @@
 use tui_input::Input;
-use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry};
+use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry, DiskStats, SystemInfo};
 use crate::config::Config;
 use crate::action::Action;
 use std::collections::HashSet;
@@ -87,6 +87,11 @@ pub struct App {
     // UI polish
     pub spinner_frame: usize,
     pub confirm_dialog: Option<(String, Box<Action>)>,
+
+    // Help & Disk stats
+    pub show_help: bool,
+    pub disk_stats: DiskStats,
+    pub system_info: SystemInfo,
 }
 
 const TAB_COUNT: usize = 8;
@@ -128,6 +133,9 @@ impl App {
             last_checked: None,
             spinner_frame: 0,
             confirm_dialog: None,
+            show_help: false,
+            disk_stats: DiskStats::default(),
+            system_info: SystemInfo::default(),
         }
     }
 
