@@ -38,14 +38,15 @@ async fn check_internet_connection() -> bool {
         }
     }
 
-    let addr = match "1.1.1.1:53".parse::<std::net::SocketAddr>() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-    let is_online = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tokio::net::TcpStream::connect(&addr)
-    ).await.is_ok();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let is_online = client.get("http://clients3.google.com/generate_204")
+        .send()
+        .await
+        .is_ok();
 
     if let Ok(mut guard) = INTERNET_CACHE.lock() {
         *guard = Some((std::time::Instant::now(), is_online));
@@ -1095,17 +1096,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .status();
 
                     let status = if all {
-                        println!("\n>>> sudo pacman -Sc\n");
+                        println!("\n>>> sudo pacman -Sc --noconfirm\n");
                         std::process::Command::new("sudo")
-                            .arg("pacman")
-                            .arg("-Sc")
+                            .args(["pacman", "-Sc", "--noconfirm"])
                             .status()
                     } else {
-                        println!("\n>>> sudo paccache -r\n");
-                        std::process::Command::new("sudo")
-                            .arg("paccache")
-                            .arg("-r")
-                            .status()
+                        if command_exists("paccache") {
+                            println!("\n>>> sudo paccache -r\n");
+                            std::process::Command::new("sudo")
+                                .args(["paccache", "-r"])
+                                .status()
+                        } else {
+                            println!("\n⚠️  paccache (pacman-contrib) not found. Falling back to pacman -Sc --noconfirm...\n");
+                            std::process::Command::new("sudo")
+                                .args(["pacman", "-Sc", "--noconfirm"])
+                                .status()
+                        }
                     };
 
                     match status {
@@ -1408,7 +1414,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     if let Some((name, repo)) = scan_target {
                                         if repo != "aur" {
-                                            tx.send(Action::Error("⚠️ Security scan only works for AUR packages (repo packages are pre-compiled & trusted).".to_string())).ok();
+                                            tx.send(Action::ShowConfirm(
+                                                "⚠️ Security scan only works for AUR packages (repo packages are pre-compiled & trusted). Press Esc/N to close.".to_string(),
+                                                Box::new(Action::ConfirmNo),
+                                            )).ok();
                                         } else {
                                             tx.send(Action::ScanPackage(name)).ok();
                                         }
@@ -1442,7 +1451,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     if let Some((name, repo)) = view_target {
                                         if repo != "aur" {
-                                            tx.send(Action::Error("⚠️ PKGBUILD is only available for AUR packages.".to_string())).ok();
+                                            tx.send(Action::ShowConfirm(
+                                                "⚠️ PKGBUILD is only available for AUR packages. Press Esc/N to close.".to_string(),
+                                                Box::new(Action::ConfirmNo),
+                                            )).ok();
                                         } else {
                                             tx.send(Action::ViewPkgbuild(name)).ok();
                                         }
