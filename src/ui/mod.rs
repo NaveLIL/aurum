@@ -1149,6 +1149,11 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         _ => "Unknown",
     };
 
+    let team = format!("🔨 Built by {}", crate::types::TEAM_SIG);
+    let left_len = route_name.len() + 3 + status.len() + 2;
+    let padding_len = (area.width as usize).saturating_sub(left_len + team.len() + 4);
+    let padding = " ".repeat(padding_len);
+
     let footer_line = Line::from(vec![
         Span::styled(
             format!(" {} ", route_name),
@@ -1159,6 +1164,8 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         ),
         Span::raw(" "),
         Span::styled(status, Style::default().fg(Color::Rgb(160, 180, 220))),
+        Span::raw(padding),
+        Span::styled(team, Style::default().fg(Color::Rgb(100, 110, 130))),
     ]);
 
     let paragraph = Paragraph::new(footer_line).block(

@@ -32,6 +32,7 @@ pub struct SystemInfo {
     pub lts_kernel_installed: bool,
     pub multiple_kernels_installed: bool,
     pub cachyos_kernel_installed: bool,
+    pub is_online: bool,
 }
 
 
@@ -101,3 +102,5 @@ pub struct CacheEntry {
     pub size_bytes: u64,
     pub last_modified: String,
 }
+
+pub const TEAM_SIG: &str = "EREZ Dev";

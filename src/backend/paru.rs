@@ -7,6 +7,14 @@ use std::sync::OnceLock;
 
 static UPDATE_RE: OnceLock<Regex> = OnceLock::new();
 
+async fn run_command_with_timeout(mut cmd: Command, timeout_dur: std::time::Duration) -> Result<std::process::Output> {
+    cmd.kill_on_drop(true);
+    tokio::time::timeout(timeout_dur, cmd.output())
+        .await
+        .context("Command timed out")?
+        .context("Command execution failed")
+}
+
 pub struct Paru;
 
 impl Paru {
@@ -15,7 +23,8 @@ impl Paru {
         let re = UPDATE_RE.get_or_init(|| Regex::new(r"^(\S+)\s+(\S+)\s+->\s+(\S+)").unwrap());
 
         // 1. Fetch official repo updates via checkupdates
-        match Command::new("checkupdates").output().await {
+        let cmd = Command::new("checkupdates");
+        match run_command_with_timeout(cmd, std::time::Duration::from_secs(10)).await {
             Ok(output) => {
                 if output.status.success() || output.status.code() == Some(2) {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -37,7 +46,9 @@ impl Paru {
         }
 
         // 2. Fetch AUR updates via paru -Qua
-        if let Ok(output) = Command::new("paru").arg("-Qua").output().await {
+        let mut cmd = Command::new("paru");
+        cmd.arg("-Qua");
+        if let Ok(output) = run_command_with_timeout(cmd, std::time::Duration::from_secs(10)).await {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
@@ -58,9 +69,9 @@ impl Paru {
     }
 
     pub async fn get_installed() -> Result<Vec<Package>> {
-        let output = Command::new("paru")
-            .arg("-Qm")
-            .output()
+        let mut cmd = Command::new("paru");
+        cmd.arg("-Qm");
+        let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(10))
             .await
             .context("Failed to execute paru -Qm")?;
 
@@ -92,9 +103,9 @@ impl Paru {
 
     pub async fn get_info(pkg_name: &str) -> Result<Option<Package>> {
         // Try local info first (installed packages)
-        let output = Command::new("paru")
-            .args(["-Qi", pkg_name])
-            .output()
+        let mut cmd = Command::new("paru");
+        cmd.args(["-Qi", pkg_name]);
+        let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(10))
             .await
             .context("Failed to execute paru -Qi")?;
 
@@ -102,9 +113,9 @@ impl Paru {
             String::from_utf8(output.stdout)?
         } else {
             // Try remote info
-            let output = Command::new("paru")
-                .args(["-Si", pkg_name])
-                .output()
+            let mut cmd = Command::new("paru");
+            cmd.args(["-Si", pkg_name]);
+            let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(10))
                 .await
                 .context("Failed to execute paru -Si")?;
             if !output.status.success() {
@@ -139,10 +150,9 @@ impl Paru {
     }
 
     pub async fn get_pkgbuild(pkg_name: &str) -> Result<String> {
-        let output = Command::new("paru")
-            .arg("-Gp")
-            .arg(pkg_name)
-            .output()
+        let mut cmd = Command::new("paru");
+        cmd.arg("-Gp").arg(pkg_name);
+        let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(10))
             .await
             .context("Failed to get PKGBUILD")?;
 
@@ -202,6 +212,15 @@ impl Paru {
 
     pub async fn clean_cache(name: String) -> Result<()> {
         tokio::task::spawn_blocking(move || {
+            use std::path::Component;
+            let path_name = std::path::Path::new(&name);
+            for component in path_name.components() {
+                match component {
+                    Component::Normal(_) => {},
+                    _ => return Err(anyhow::anyhow!("Invalid cache entry name: safety check failed")),
+                }
+            }
+
             let cache_dir = dirs::cache_dir()
                 .ok_or_else(|| anyhow::anyhow!("No cache dir"))?
                 .join("paru/clone")
@@ -237,9 +256,9 @@ impl Paru {
     }
 
     pub async fn get_orphans() -> Result<Vec<Package>> {
-        let output = Command::new("paru")
-            .arg("-Qdtq")
-            .output()
+        let mut cmd = Command::new("paru");
+        cmd.arg("-Qdtq");
+        let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(10))
             .await
             .context("Failed to execute paru -Qdtq")?;
 
@@ -260,11 +279,9 @@ impl Paru {
         }
 
         // Run pacman -Qi with LC_ALL=C for all orphan packages to get sizes & descriptions in a single call
-        let qi_output = Command::new("pacman")
-            .arg("-Qi")
-            .args(&orphan_names)
-            .env("LC_ALL", "C")
-            .output()
+        let mut qi_cmd = Command::new("pacman");
+        qi_cmd.arg("-Qi").args(&orphan_names).env("LC_ALL", "C");
+        let qi_output = run_command_with_timeout(qi_cmd, std::time::Duration::from_secs(10))
             .await
             .context("Failed to run pacman -Qi")?;
 
@@ -346,12 +363,9 @@ impl Paru {
     }
 
     pub async fn get_disk_stats() -> Result<DiskStats> {
-        let df_output = Command::new("df")
-            .arg("-B1")
-            .arg("--output=avail,size")
-            .arg("/")
-            .env("LC_ALL", "C")
-            .output()
+        let mut df_cmd = Command::new("df");
+        df_cmd.arg("-B1").arg("--output=avail,size").arg("/").env("LC_ALL", "C");
+        let df_output = run_command_with_timeout(df_cmd, std::time::Duration::from_secs(5))
             .await?;
 
         let mut free_bytes = 0;
@@ -406,10 +420,9 @@ impl Paru {
             "linux-cachyos-rc-sched-ext",
         ];
 
-        let output = Command::new("pacman")
-            .arg("-Qq")
-            .args(&kernel_list)
-            .output()
+        let mut cmd = Command::new("pacman");
+        cmd.arg("-Qq").args(&kernel_list);
+        let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(5))
             .await;
 
         let mut installed_kernels = Vec::new();
@@ -487,6 +500,7 @@ impl Paru {
             lts_kernel_installed,
             multiple_kernels_installed,
             cachyos_kernel_installed,
+            is_online: true,
         })
     }
 }

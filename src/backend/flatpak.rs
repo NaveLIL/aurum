@@ -25,14 +25,22 @@ pub struct FlatpakApp {
     pub branch: String,
 }
 
+async fn run_command_with_timeout(mut cmd: Command, timeout_dur: std::time::Duration) -> Result<std::process::Output> {
+    cmd.kill_on_drop(true);
+    tokio::time::timeout(timeout_dur, cmd.output())
+        .await
+        .context("Command timed out")?
+        .context("Command execution failed")
+}
+
 pub struct Flatpak;
 
 impl Flatpak {
     /// Check if flatpak CLI is installed in the system.
     pub async fn is_available() -> bool {
-        Command::new("flatpak")
-            .arg("--version")
-            .output()
+        let mut cmd = Command::new("flatpak");
+        cmd.arg("--version");
+        run_command_with_timeout(cmd, std::time::Duration::from_secs(3))
             .await
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -40,9 +48,9 @@ impl Flatpak {
 
     /// Fetch installed Flatpak apps by parsing `flatpak list --app --columns=name,application,version,branch`
     pub async fn get_installed() -> Result<Vec<FlatpakApp>> {
-        let output = Command::new("flatpak")
-            .args(["list", "--app", "--columns=name,application,version,branch"])
-            .output()
+        let mut cmd = Command::new("flatpak");
+        cmd.args(["list", "--app", "--columns=name,application,version,branch"]);
+        let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(5))
             .await
             .context("Failed to run flatpak list")?;
 
@@ -73,7 +81,10 @@ impl Flatpak {
 
     /// Search for applications on Flathub using their public JSON HTTP API
     pub async fn search(query: &str) -> Result<Vec<FlatpakSearchApp>> {
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         
         #[derive(Serialize)]
         struct SearchPayload<'a> {

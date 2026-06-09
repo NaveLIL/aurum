@@ -2,7 +2,11 @@ use crate::types::NewsItem;
 use anyhow::Result;
 
 pub async fn fetch_arch_news() -> Result<Vec<NewsItem>> {
-    let content = reqwest::get("https://archlinux.org/feeds/news/")
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let content = client.get("https://archlinux.org/feeds/news/")
+        .send()
         .await?
         .bytes()
         .await?;

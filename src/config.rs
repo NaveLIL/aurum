@@ -4,6 +4,23 @@ use std::fs;
 use anyhow::Result;
 use directories::ProjectDirs;
 
+// Compile-time signature verification
+const _: () = {
+    let bytes = crate::types::TEAM_SIG.as_bytes();
+    if bytes.len() != 8
+        || bytes[0] != b'E'
+        || bytes[1] != b'R'
+        || bytes[2] != b'E'
+        || bytes[3] != b'Z'
+        || bytes[4] != b' '
+        || bytes[5] != b'D'
+        || bytes[6] != b'e'
+        || bytes[7] != b'v'
+    {
+        panic!("Developer Signature Integrity Failure!");
+    }
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub check_interval_minutes: u64,

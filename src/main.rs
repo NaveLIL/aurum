@@ -27,21 +27,50 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
+static INTERNET_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> = std::sync::Mutex::new(None);
+
+async fn check_internet_connection() -> bool {
+    if let Ok(guard) = INTERNET_CACHE.lock() {
+        if let Some((last_check, val)) = *guard {
+            if last_check.elapsed() < std::time::Duration::from_secs(30) {
+                return val;
+            }
+        }
+    }
+
+    let addr = match "1.1.1.1:53".parse::<std::net::SocketAddr>() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let is_online = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::net::TcpStream::connect(&addr)
+    ).await.is_ok();
+
+    if let Ok(mut guard) = INTERNET_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), is_online));
+    }
+    is_online
+}
+
 fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_available: bool) {
     tokio::spawn(async move {
-        tx.send(Action::SetStatus("Refreshing...".to_string())).ok();
+        tx.send(Action::SetStatus("Checking network...".to_string())).ok();
+
+        let is_online = check_internet_connection().await;
+
+        let tx6 = tx.clone();
+        let t6 = tokio::spawn(async move {
+            if let Ok(mut info) = backend::paru::Paru::get_system_info().await {
+                info.is_online = is_online;
+                tx6.send(Action::SetSystemInfo(info)).ok();
+            }
+        });
 
         let tx1 = tx.clone();
         let t1 = tokio::spawn(async move {
             if let Ok(pkgs) = backend::paru::Paru::get_installed().await {
                 tx1.send(Action::SetInstalled(pkgs)).ok();
-            }
-        });
-
-        let tx2 = tx.clone();
-        let t2 = tokio::spawn(async move {
-            if let Ok(updates) = backend::paru::Paru::get_updates().await {
-                tx2.send(Action::SetUpdates(updates)).ok();
             }
         });
 
@@ -52,15 +81,6 @@ fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_availab
             }
         });
 
-        let tx4 = tx.clone();
-        let t4 = tokio::spawn(async move {
-            if flatpak_available {
-                if let Ok(flatpaks) = backend::flatpak::Flatpak::get_installed().await {
-                    tx4.send(Action::SetFlatpakInstalled(flatpaks)).ok();
-                }
-            }
-        });
-
         let tx5 = tx.clone();
         let t5 = tokio::spawn(async move {
             if let Ok(stats) = backend::paru::Paru::get_disk_stats().await {
@@ -68,10 +88,27 @@ fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_availab
             }
         });
 
-        let tx6 = tx.clone();
-        let t6 = tokio::spawn(async move {
-            if let Ok(info) = backend::paru::Paru::get_system_info().await {
-                tx6.send(Action::SetSystemInfo(info)).ok();
+        if !is_online {
+            let _ = tokio::join!(t1, t3, t5, t6);
+            tx.send(Action::SetStatus("⚠️ Offline Mode (Network connection failed)".to_string())).ok();
+            return;
+        }
+
+        tx.send(Action::SetStatus("Refreshing...".to_string())).ok();
+
+        let tx2 = tx.clone();
+        let t2 = tokio::spawn(async move {
+            if let Ok(Ok(updates)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::paru::Paru::get_updates()).await {
+                tx2.send(Action::SetUpdates(updates)).ok();
+            }
+        });
+
+        let tx4 = tx.clone();
+        let t4 = tokio::spawn(async move {
+            if flatpak_available {
+                if let Ok(Ok(flatpaks)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::flatpak::Flatpak::get_installed()).await {
+                    tx4.send(Action::SetFlatpakInstalled(flatpaks)).ok();
+                }
             }
         });
 
@@ -96,6 +133,9 @@ use std::sync::atomic::AtomicBool;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if crate::types::TEAM_SIG != "EREZ Dev" {
+        panic!("Critical Integrity Failure: Developer signature corrupted.");
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         return handle_cli(args).await;
@@ -132,29 +172,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initial data fetch
     let tx_load = tx.clone();
     tokio::spawn(async move {
-        tx_load.send(Action::SetStatus("Loading data...".to_string())).ok();
+        tx_load.send(Action::SetStatus("Checking network...".to_string())).ok();
+
+        let is_online = check_internet_connection().await;
+
+        let tx8 = tx_load.clone();
+        let t8 = tokio::spawn(async move {
+            match backend::paru::Paru::get_system_info().await {
+                Ok(mut info) => {
+                    info.is_online = is_online;
+                    tx8.send(Action::SetSystemInfo(info)).ok();
+                }
+                Err(e) => { tx8.send(Action::Error(format!("Failed to load system info: {}", e))).ok(); }
+            }
+        });
 
         let tx1 = tx_load.clone();
         let t1 = tokio::spawn(async move {
             match backend::paru::Paru::get_installed().await {
                 Ok(pkgs) => { tx1.send(Action::SetInstalled(pkgs)).ok(); }
                 Err(e) => { tx1.send(Action::Error(format!("Failed to load installed: {}", e))).ok(); }
-            }
-        });
-
-        let tx2 = tx_load.clone();
-        let t2 = tokio::spawn(async move {
-            match backend::paru::Paru::get_updates().await {
-                Ok(updates) => { tx2.send(Action::SetUpdates(updates)).ok(); }
-                Err(e) => { tx2.send(Action::Error(format!("Failed to check updates: {}", e))).ok(); }
-            }
-        });
-
-        let tx3 = tx_load.clone();
-        let t3 = tokio::spawn(async move {
-            match backend::news::fetch_arch_news().await {
-                Ok(news) => { tx3.send(Action::SetNews(news)).ok(); }
-                Err(e) => { tx3.send(Action::Error(format!("Failed to load news: {}", e))).ok(); }
             }
         });
 
@@ -174,17 +211,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-        let tx6 = tx_load.clone();
-        let t6 = tokio::spawn(async move {
-            let flatpak_avail = backend::flatpak::Flatpak::is_available().await;
-            tx6.send(Action::SetFlatpakAvailable(flatpak_avail)).ok();
-            if flatpak_avail {
-                if let Ok(flatpaks) = backend::flatpak::Flatpak::get_installed().await {
-                    tx6.send(Action::SetFlatpakInstalled(flatpaks)).ok();
-                }
-            }
-        });
-
         let tx7 = tx_load.clone();
         let t7 = tokio::spawn(async move {
             match backend::paru::Paru::get_disk_stats().await {
@@ -193,11 +219,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-        let tx8 = tx_load.clone();
-        let t8 = tokio::spawn(async move {
-            match backend::paru::Paru::get_system_info().await {
-                Ok(info) => { tx8.send(Action::SetSystemInfo(info)).ok(); }
-                Err(e) => { tx8.send(Action::Error(format!("Failed to load system info: {}", e))).ok(); }
+        if !is_online {
+            let _ = tokio::join!(t1, t4, t5, t7, t8);
+            tx_load.send(Action::SetStatus("⚠️ Offline Mode (Network connection failed)".to_string())).ok();
+            return;
+        }
+
+        tx_load.send(Action::SetStatus("Loading data...".to_string())).ok();
+
+        let tx2 = tx_load.clone();
+        let t2 = tokio::spawn(async move {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), backend::paru::Paru::get_updates()).await {
+                Ok(Ok(updates)) => { tx2.send(Action::SetUpdates(updates)).ok(); }
+                _ => {}
+            }
+        });
+
+        let tx3 = tx_load.clone();
+        let t3 = tokio::spawn(async move {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), backend::news::fetch_arch_news()).await {
+                Ok(Ok(news)) => { tx3.send(Action::SetNews(news)).ok(); }
+                _ => {}
+            }
+        });
+
+        let tx6 = tx_load.clone();
+        let t6 = tokio::spawn(async move {
+            let flatpak_avail = backend::flatpak::Flatpak::is_available().await;
+            tx6.send(Action::SetFlatpakAvailable(flatpak_avail)).ok();
+            if flatpak_avail {
+                if let Ok(Ok(flatpaks)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::flatpak::Flatpak::get_installed()).await {
+                    tx6.send(Action::SetFlatpakInstalled(flatpaks)).ok();
+                }
             }
         });
 
@@ -1338,53 +1391,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 // Security scan on selected package
                                 KeyCode::Char('s') => {
-                                    let pkg_name = match app.route {
+                                    let scan_target = match app.route {
                                         app::Route::Updates => {
                                             app.list_state.selected()
-                                                .and_then(|i| app.updates.get(i).map(|u| u.name.clone()))
+                                                .and_then(|i| app.updates.get(i).map(|u| (u.name.clone(), u.repository.clone())))
                                         }
                                         app::Route::Search => {
                                             app.list_state.selected()
-                                                .and_then(|i| app.search_results.get(i).map(|p| p.name.clone()))
+                                                .and_then(|i| app.search_results.get(i).map(|p| (p.name.clone(), p.repository.clone())))
                                         }
                                         app::Route::Installed => {
                                             app.list_state.selected()
-                                                .and_then(|i| app.installed_packages.get(i).map(|p| p.name.clone()))
+                                                .and_then(|i| app.installed_packages.get(i).map(|p| (p.name.clone(), p.repository.clone())))
                                         }
                                         _ => None,
                                     };
-                                    if let Some(name) = pkg_name {
-                                        tx.send(Action::ScanPackage(name)).ok();
+                                    if let Some((name, repo)) = scan_target {
+                                        if repo != "aur" {
+                                            tx.send(Action::Error("⚠️ Security scan only works for AUR packages (repo packages are pre-compiled & trusted).".to_string())).ok();
+                                        } else {
+                                            tx.send(Action::ScanPackage(name)).ok();
+                                        }
                                     }
                                 }
                                 // View PKGBUILD
                                 KeyCode::Char('v') => {
-                                    let pkg_name = match app.route {
+                                    let view_target = match app.route {
                                         app::Route::Updates => {
                                             app.list_state.selected()
-                                                .and_then(|i| app.updates.get(i).map(|u| u.name.clone()))
+                                                .and_then(|i| app.updates.get(i).map(|u| (u.name.clone(), u.repository.clone())))
                                         }
                                         app::Route::Search => {
                                             app.list_state.selected()
-                                                .and_then(|i| app.search_results.get(i).map(|p| p.name.clone()))
+                                                .and_then(|i| app.search_results.get(i).map(|p| (p.name.clone(), p.repository.clone())))
                                         }
                                         app::Route::Installed => {
                                             app.list_state.selected()
-                                                .and_then(|i| app.installed_packages.get(i).map(|p| p.name.clone()))
+                                                .and_then(|i| app.installed_packages.get(i).map(|p| (p.name.clone(), p.repository.clone())))
                                         }
                                         app::Route::Store => {
                                             if app.store_active_pane == 1 {
                                                 let current_cat = backend::store::get_categories()[app.store_category_index];
                                                 let apps = backend::store::get_apps_by_category(current_cat);
-                                                apps.get(app.store_app_index).map(|a| a.name.to_string())
+                                                apps.get(app.store_app_index).map(|a| (a.name.to_string(), "aur".to_string()))
                                             } else {
                                                 None
                                             }
                                         }
                                         _ => None,
                                     };
-                                    if let Some(name) = pkg_name {
-                                        tx.send(Action::ViewPkgbuild(name)).ok();
+                                    if let Some((name, repo)) = view_target {
+                                        if repo != "aur" {
+                                            tx.send(Action::Error("⚠️ PKGBUILD is only available for AUR packages.".to_string())).ok();
+                                        } else {
+                                            tx.send(Action::ViewPkgbuild(name)).ok();
+                                        }
                                     }
                                 }
                                 // Install selected package(s) (Enter in Updates/Search/Store)
@@ -1712,6 +1773,34 @@ mod tests {
         assert_eq!(translate_cyrillic('1'), '1');
         assert_eq!(translate_cyrillic('['), '[');
     }
+
+    #[test]
+    fn test_expand_tilde() {
+        // Test paths that don't start with ~
+        assert_eq!(expand_tilde("/usr/bin"), std::path::PathBuf::from("/usr/bin"));
+        assert_eq!(expand_tilde("some/relative/path"), std::path::PathBuf::from("some/relative/path"));
+
+        // Test ~ path itself
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expand_tilde("~"), home);
+            assert_eq!(expand_tilde("~/Downloads"), home.join("Downloads"));
+        }
+    }
+}
+
+fn expand_tilde<P: AsRef<std::path::Path>>(path: P) -> std::path::PathBuf {
+    let path = path.as_ref();
+    if path.starts_with("~") {
+        if let Some(home) = dirs::home_dir() {
+            if path == std::path::Path::new("~") {
+                return home;
+            }
+            if let Ok(stripped) = path.strip_prefix("~") {
+                return home.join(stripped);
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 async fn handle_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
@@ -1728,53 +1817,65 @@ async fn handle_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         // If there's only one target, it might be a file or a PKGBUILD directory
         if targets.len() == 1 {
             let target = &targets[0];
-            let path = std::path::Path::new(target);
+            let is_path_like = target.contains('/') || target.contains('.') || target.starts_with('~');
+            let expanded_path = expand_tilde(target);
+            let path = std::path::Path::new(&expanded_path);
             
-            if path.is_file() {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext == "zst" || ext == "xz" {
-                    println!("📦 Detected local Arch package archive: {}", target);
-                    println!(">>> sudo pacman -U {}", target);
-                    let status = std::process::Command::new("sudo")
-                        .args(["pacman", "-U", target])
-                        .status()?;
-                    if !status.success() {
-                        std::process::exit(status.code().unwrap_or(1));
-                    }
-                    return Ok(());
+            if is_path_like {
+                if !path.exists() {
+                    println!("❌ Error: Path '{}' does not exist.", path.display());
+                    std::process::exit(1);
                 }
-            } else if path.is_dir() {
-                if path.join("PKGBUILD").exists() {
-                    println!("🛠️ Detected PKGBUILD source directory: {}", target);
-                    
-                    // Safety check: makepkg cannot run as root
-                    let is_root = std::process::Command::new("id")
-                        .arg("-u")
-                        .output()
-                        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
-                        .unwrap_or(false);
-                        
-                    if is_root {
-                        println!("\n❌ Error: You are running aurum as root/sudo.");
-                        println!("Building Arch packages (makepkg) as root is not allowed for security reasons.");
-                        println!("Please run this command without sudo:");
-                        println!("  aurum install {}", target);
-                        println!("Aurum will request password escalation automatically during installation.");
+                
+                if path.is_file() {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if ext == "zst" || ext == "xz" {
+                        println!("📦 Detected local Arch package archive: {}", path.display());
+                        println!(">>> sudo pacman -U {}", path.display());
+                        let status = std::process::Command::new("sudo")
+                            .args(["pacman", "-U", &path.to_string_lossy()])
+                            .status()?;
+                        if !status.success() {
+                            std::process::exit(status.code().unwrap_or(1));
+                        }
+                        return Ok(());
+                    } else {
+                        println!("❌ Error: File '{}' is not a valid Arch package archive (.pkg.tar.zst or .pkg.tar.xz).", path.display());
                         std::process::exit(1);
                     }
-                    
-                    println!(">>> makepkg -si (inside {})", target);
-                    let status = std::process::Command::new("makepkg")
-                        .args(["-si"])
-                        .current_dir(path)
-                        .status()?;
-                    if !status.success() {
-                        std::process::exit(status.code().unwrap_or(1));
+                } else if path.is_dir() {
+                    if path.join("PKGBUILD").exists() {
+                        println!("🛠️ Detected PKGBUILD source directory: {}", path.display());
+                        
+                        // Safety check: makepkg cannot run as root
+                        let is_root = std::process::Command::new("id")
+                            .arg("-u")
+                            .output()
+                            .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+                            .unwrap_or(false);
+                            
+                        if is_root {
+                            println!("\n❌ Error: You are running aurum as root/sudo.");
+                            println!("Building Arch packages (makepkg) as root is not allowed for security reasons.");
+                            println!("Please run this command without sudo:");
+                            println!("  aurum install {}", path.display());
+                            println!("Aurum will request password escalation automatically during installation.");
+                            std::process::exit(1);
+                        }
+                        
+                        println!(">>> makepkg -si (inside {})", path.display());
+                        let status = std::process::Command::new("makepkg")
+                            .args(["-si"])
+                            .current_dir(path)
+                            .status()?;
+                        if !status.success() {
+                            std::process::exit(status.code().unwrap_or(1));
+                        }
+                        return Ok(());
+                    } else {
+                        println!("⚠️ Error: Directory '{}' does not contain a PKGBUILD file.", path.display());
+                        std::process::exit(1);
                     }
-                    return Ok(());
-                } else {
-                    println!("⚠️ Error: Directory '{}' does not contain a PKGBUILD file.", target);
-                    std::process::exit(1);
                 }
             }
         }
