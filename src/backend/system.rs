@@ -62,24 +62,70 @@ pub fn read_mem_stats() -> Result<(u64, u64, u64, u64)> {
 }
 
 pub fn read_cpu_temp() -> Option<f64> {
-    if let Ok(temp_str) = fs::read_to_string("/sys/class/thermal/thermal_zone0/temp") {
-        if let Ok(temp_val) = temp_str.trim().parse::<f64>() {
-            return Some(temp_val / 1000.0);
-        }
-    }
-    
-    // Fallback: hwmon devices
+    // 1. Try hwmon devices with preferred names (coretemp, k10temp, zenpower)
     if let Ok(entries) = fs::read_dir("/sys/class/hwmon") {
+        let mut fallback_temp = None;
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Ok(subentries) = fs::read_dir(&path) {
-                for subentry in subentries.flatten() {
-                    let subpath = subentry.path();
-                    if let Some(name) = subpath.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("temp") && name.ends_with("_input") {
-                            if let Ok(temp_str) = fs::read_to_string(subpath) {
+            if let Ok(name) = fs::read_to_string(path.join("name")) {
+                let name = name.trim();
+                if name == "coretemp" || name == "k10temp" || name == "zenpower" {
+                    // Try to find temp1_input or any temp*_input
+                    // Typically temp1_input is Package id 0 or Tdie
+                    if let Ok(temp_str) = fs::read_to_string(path.join("temp1_input")) {
+                        if let Ok(temp_val) = temp_str.trim().parse::<f64>() {
+                            return Some(temp_val / 1000.0);
+                        }
+                    }
+                    // If temp1_input failed, try to find any temp*_input
+                    if let Ok(subentries) = fs::read_dir(&path) {
+                        for subentry in subentries.flatten() {
+                            let subpath = subentry.path();
+                            if let Some(filename) = subpath.file_name().and_then(|n| n.to_str()) {
+                                if filename.starts_with("temp") && filename.ends_with("_input") {
+                                    if let Ok(temp_str) = fs::read_to_string(&subpath) {
+                                        if let Ok(temp_val) = temp_str.trim().parse::<f64>() {
+                                            return Some(temp_val / 1000.0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if name == "dell_smm" {
+                    // dell_smm is also a good CPU temp sensor fallback
+                    if let Ok(temp_str) = fs::read_to_string(path.join("temp1_input")) {
+                        if let Ok(temp_val) = temp_str.trim().parse::<f64>() {
+                            fallback_temp = Some(temp_val / 1000.0);
+                        }
+                    }
+                }
+            }
+        }
+        if fallback_temp.is_some() {
+            return fallback_temp;
+        }
+    }
+
+    // 2. Try thermal zones with preferred types
+    if let Ok(entries) = fs::read_dir("/sys/class/thermal") {
+        let mut acpi_fallback = None;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                if filename.starts_with("thermal_zone") {
+                    if let Ok(type_str) = fs::read_to_string(path.join("type")) {
+                        let type_str = type_str.trim().to_lowercase();
+                        if type_str == "x86_pkg_temp" || type_str.contains("cpu") {
+                            if let Ok(temp_str) = fs::read_to_string(path.join("temp")) {
                                 if let Ok(temp_val) = temp_str.trim().parse::<f64>() {
                                     return Some(temp_val / 1000.0);
+                                }
+                            }
+                        } else if type_str == "acpitz" {
+                            if let Ok(temp_str) = fs::read_to_string(path.join("temp")) {
+                                if let Ok(temp_val) = temp_str.trim().parse::<f64>() {
+                                    acpi_fallback = Some(temp_val / 1000.0);
                                 }
                             }
                         }
@@ -87,7 +133,11 @@ pub fn read_cpu_temp() -> Option<f64> {
                 }
             }
         }
+        if acpi_fallback.is_some() {
+            return acpi_fallback;
+        }
     }
+
     None
 }
 
