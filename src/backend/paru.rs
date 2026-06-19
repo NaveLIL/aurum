@@ -1,5 +1,5 @@
 use tokio::process::Command;
-use crate::types::{Package, Update, CacheEntry, DiskStats, SystemInfo};
+use crate::types::{Package, Update, CacheEntry, DiskStats, SystemInfo, CacheSource};
 use anyhow::{Result, Context};
 use regex::Regex;
 use dirs;
@@ -163,9 +163,140 @@ impl Paru {
         Ok(String::from_utf8(output.stdout)?)
     }
 
+    pub async fn get_pkgbuild_diff(pkg_name: &str, installed_ver: Option<&str>) -> Result<String> {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let clone_parent = home.join(".cache/paru/clone");
+        let clone_dir = clone_parent.join(pkg_name);
+
+        // 1. Clone or fetch repository
+        if !clone_dir.exists() {
+            tokio::fs::create_dir_all(&clone_parent).await?;
+            let mut clone_cmd = Command::new("git");
+            clone_cmd.arg("clone").arg("--depth=20").arg(format!("https://aur.archlinux.org/{}.git", pkg_name)).arg(&clone_dir);
+            let output = run_command_with_timeout(clone_cmd, std::time::Duration::from_secs(15)).await?;
+            if !output.status.success() {
+                return Err(anyhow::anyhow!("Failed to clone AUR repository for diff"));
+            }
+        } else {
+            let mut fetch_cmd = Command::new("git");
+            fetch_cmd.arg("fetch").arg("origin").current_dir(&clone_dir);
+            let _ = run_command_with_timeout(fetch_cmd, std::time::Duration::from_secs(10)).await;
+
+            let mut reset_cmd = Command::new("git");
+            reset_cmd.arg("reset").arg("--hard").arg("origin/master").current_dir(&clone_dir);
+            let _ = run_command_with_timeout(reset_cmd, std::time::Duration::from_secs(5)).await;
+        }
+
+        // 2. Identify base commit
+        let mut base_commit = None;
+        if let Some(ver) = installed_ver {
+            let base_ver = ver.split('-').next().unwrap_or(ver);
+            let mut log_cmd = Command::new("git");
+            log_cmd.args(["log", "-S", &format!("pkgver={}", base_ver), "--pretty=format:%H", "-n", "1", "PKGBUILD"])
+                .current_dir(&clone_dir);
+            if let Ok(output) = run_command_with_timeout(log_cmd, std::time::Duration::from_secs(5)).await {
+                if output.status.success() {
+                    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !hash.is_empty() {
+                        base_commit = Some(hash);
+                    }
+                }
+            }
+        }
+
+        // 3. Generate diff
+        let mut diff_cmd = Command::new("git");
+        diff_cmd.arg("diff");
+        if let Some(ref commit) = base_commit {
+            diff_cmd.arg(format!("{}..HEAD", commit));
+        } else {
+            diff_cmd.arg("HEAD~1..HEAD");
+        }
+        diff_cmd.arg("PKGBUILD").current_dir(&clone_dir);
+
+        let output = run_command_with_timeout(diff_cmd, std::time::Duration::from_secs(5)).await?;
+        if output.status.success() {
+            let diff_out = String::from_utf8_lossy(&output.stdout).to_string();
+            if diff_out.trim().is_empty() {
+                Ok("No differences found in PKGBUILD.".to_string())
+            } else {
+                Ok(diff_out)
+            }
+        } else {
+            let mut fallback_cmd = Command::new("git");
+            fallback_cmd.args(["diff", "HEAD~1..HEAD", "PKGBUILD"]).current_dir(&clone_dir);
+            if let Ok(output) = run_command_with_timeout(fallback_cmd, std::time::Duration::from_secs(5)).await {
+                if output.status.success() {
+                    let diff_out = String::from_utf8_lossy(&output.stdout).to_string();
+                    if !diff_out.trim().is_empty() {
+                        return Ok(diff_out);
+                    }
+                }
+            }
+            Ok("No differences found in PKGBUILD.".to_string())
+        }
+    }
+
+    pub async fn get_pacman_cache_entries() -> Result<Vec<CacheEntry>> {
+        tokio::task::spawn_blocking(move || {
+            let cache_path = std::path::Path::new("/var/cache/pacman/pkg");
+            if !cache_path.exists() {
+                return Ok(Vec::new());
+            }
+
+            let mut groups: std::collections::HashMap<String, (u64, std::time::SystemTime)> = std::collections::HashMap::new();
+
+            for entry in std::fs::read_dir(cache_path)? {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                if metadata.is_file() {
+                    let file_name = match entry.file_name().into_string() {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+
+                    // Ignore .part or download-* temp files
+                    if file_name.ends_with(".part") || file_name.starts_with("download-") {
+                        continue;
+                    }
+
+                    if let Some(pkg_name) = parse_package_name(&file_name) {
+                        let size = metadata.len();
+                        let modified = metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+                        let entry_ref = groups.entry(pkg_name).or_insert((0, std::time::SystemTime::UNIX_EPOCH));
+                        entry_ref.0 += size;
+                        if modified > entry_ref.1 {
+                            entry_ref.1 = modified;
+                        }
+                    }
+                }
+            }
+
+            let mut result = Vec::new();
+            for (name, (size_bytes, modified_time)) in groups {
+                let last_modified = {
+                    let duration = modified_time.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                    chrono::DateTime::from_timestamp(duration.as_secs() as i64, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                };
+                result.push(CacheEntry {
+                    name,
+                    size_bytes,
+                    last_modified,
+                    source: CacheSource::Pacman,
+                });
+            }
+
+            Ok(result)
+        })
+        .await
+        .context("spawn_blocking failed")?
+    }
 
     pub async fn get_cache_entries_with_size() -> Result<Vec<CacheEntry>> {
-        tokio::task::spawn_blocking(move || {
+        let mut aur_entries = tokio::task::spawn_blocking(move || -> Result<Vec<CacheEntry>> {
             let cache_dir = dirs::cache_dir()
                 .ok_or_else(|| anyhow::anyhow!("No cache dir"))?
                 .join("paru/clone");
@@ -200,56 +331,120 @@ impl Paru {
                         name,
                         size_bytes: size,
                         last_modified: modified,
+                        source: CacheSource::Aur,
                     });
                 }
             }
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(entries)
         })
         .await
-        .context("spawn_blocking failed")?
+        .context("spawn_blocking failed")??;
+
+        let mut pacman_entries = Self::get_pacman_cache_entries().await.unwrap_or_default();
+        aur_entries.append(&mut pacman_entries);
+        aur_entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(aur_entries)
     }
 
-    pub async fn clean_cache(name: String) -> Result<()> {
+    pub async fn clean_cache(entry: CacheEntry) -> Result<()> {
         tokio::task::spawn_blocking(move || {
-            use std::path::Component;
-            let path_name = std::path::Path::new(&name);
-            for component in path_name.components() {
-                match component {
-                    Component::Normal(_) => {},
-                    _ => return Err(anyhow::anyhow!("Invalid cache entry name: safety check failed")),
+            match entry.source {
+                CacheSource::Aur => {
+                    use std::path::Component;
+                    let path_name = std::path::Path::new(&entry.name);
+                    for component in path_name.components() {
+                        match component {
+                            Component::Normal(_) => {},
+                            _ => return Err(anyhow::anyhow!("Invalid cache entry name: safety check failed")),
+                        }
+                    }
+
+                    let cache_dir = dirs::cache_dir()
+                        .ok_or_else(|| anyhow::anyhow!("No cache dir"))?
+                        .join("paru/clone")
+                        .join(&entry.name);
+
+                    if cache_dir.exists() {
+                        std::fs::remove_dir_all(&cache_dir)?;
+                    }
+                    Ok(())
+                }
+                CacheSource::Pacman => {
+                    let cache_path = std::path::Path::new("/var/cache/pacman/pkg");
+                    if !cache_path.exists() {
+                        return Ok(());
+                    }
+
+                    for file_entry in std::fs::read_dir(cache_path)? {
+                        let file_entry = file_entry?;
+                        let file_name = match file_entry.file_name().into_string() {
+                            Ok(n) => n,
+                            Err(_) => continue,
+                        };
+
+                        if let Some(parsed_name) = parse_package_name(&file_name) {
+                            if parsed_name == entry.name {
+                                if let Err(e) = std::fs::remove_file(file_entry.path()) {
+                                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                                        return Err(anyhow::anyhow!(
+                                            "Permission denied: Failed to delete pacman cache file '{}'. The TUI might need to be run with 'sudo' or elevated privileges to clean the pacman cache.",
+                                            file_name
+                                        ));
+                                    } else {
+                                        return Err(anyhow::Error::from(e));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
                 }
             }
-
-            let cache_dir = dirs::cache_dir()
-                .ok_or_else(|| anyhow::anyhow!("No cache dir"))?
-                .join("paru/clone")
-                .join(name);
-
-            if cache_dir.exists() {
-                std::fs::remove_dir_all(&cache_dir)?;
-            }
-            Ok(())
         })
         .await
         .context("spawn_blocking failed")?
     }
 
-    pub async fn clean_all_cache() -> Result<()> {
+    pub async fn clean_all_cache() -> Result<bool> {
         tokio::task::spawn_blocking(move || {
-            let cache_dir = dirs::cache_dir()
-                .ok_or_else(|| anyhow::anyhow!("No cache dir"))?
-                .join("paru/clone");
+            let mut skipped_pacman = false;
 
-            if cache_dir.exists() {
-                for entry in std::fs::read_dir(&cache_dir)? {
-                    let entry = entry?;
-                    if entry.file_type()?.is_dir() {
-                        std::fs::remove_dir_all(entry.path())?;
+            // 1. Clean AUR clone cache
+            if let Some(cache_dir) = dirs::cache_dir() {
+                let aur_cache = cache_dir.join("paru/clone");
+                if aur_cache.exists() {
+                    for entry in std::fs::read_dir(&aur_cache)? {
+                        let entry = entry?;
+                        if entry.file_type()?.is_dir() {
+                            let _ = std::fs::remove_dir_all(entry.path());
+                        }
                     }
                 }
             }
-            Ok(())
+
+            // 2. Clean Pacman cache
+            let pacman_cache = std::path::Path::new("/var/cache/pacman/pkg");
+            if pacman_cache.exists() {
+                for entry in std::fs::read_dir(pacman_cache)? {
+                    let entry = entry?;
+                    let file_name = match entry.file_name().into_string() {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    if file_name.ends_with(".part") || file_name.starts_with("download-") {
+                        continue;
+                    }
+                    if let Err(e) = std::fs::remove_file(entry.path()) {
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            skipped_pacman = true;
+                        } else {
+                            return Err(anyhow::Error::from(e));
+                        }
+                    }
+                }
+            }
+            Ok(skipped_pacman)
         })
         .await
         .context("spawn_blocking failed")?
@@ -421,7 +616,7 @@ impl Paru {
         ];
 
         let mut cmd = Command::new("pacman");
-        cmd.arg("-Qq").args(&kernel_list);
+        cmd.arg("-Qq").args(kernel_list);
         let output = run_command_with_timeout(cmd, std::time::Duration::from_secs(5))
             .await;
 
@@ -501,6 +696,7 @@ impl Paru {
             multiple_kernels_installed,
             cachyos_kernel_installed,
             is_online: true,
+            failed_services_count: 0,
         })
     }
 }
@@ -509,16 +705,14 @@ fn dir_size_safe(path: &std::path::Path) -> u64 {
     let mut total: u64 = 0;
     if path.is_dir() {
         if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    if let Ok(ft) = entry.file_type() {
-                        if ft.is_file() {
-                            if let Ok(meta) = entry.metadata() {
-                                total += meta.len();
-                            }
-                        } else if ft.is_dir() {
-                            total += dir_size_safe(&entry.path());
+            for entry in entries.flatten() {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_file() {
+                        if let Ok(meta) = entry.metadata() {
+                            total += meta.len();
                         }
+                    } else if ft.is_dir() {
+                        total += dir_size_safe(&entry.path());
                     }
                 }
             }
@@ -547,4 +741,53 @@ pub fn format_size(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
+
+fn parse_package_name(filename: &str) -> Option<String> {
+    let prefix = if let Some(idx) = filename.find(".pkg.tar.") {
+        &filename[..idx]
+    } else {
+        return None;
+    };
+    let parts: Vec<&str> = prefix.split('-').collect();
+    if parts.len() > 3 {
+        let name_parts = &parts[..parts.len() - 3];
+        Some(name_parts.join("-"))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_package_name() {
+        assert_eq!(
+            parse_package_name("nvidia-dkms-550.78-1-x86_64.pkg.tar.zst"),
+            Some("nvidia-dkms".to_string())
+        );
+        assert_eq!(
+            parse_package_name("bash-5.1.016-3-x86_64.pkg.tar.zst"),
+            Some("bash".to_string())
+        );
+        assert_eq!(
+            parse_package_name("gcc-13.1.1-1-x86_64.pkg.tar.xz"),
+            Some("gcc".to_string())
+        );
+        assert_eq!(
+            parse_package_name("linux-lts-6.1.34-1-x86_64.pkg.tar.zst"),
+            Some("linux-lts".to_string())
+        );
+        assert_eq!(
+            parse_package_name("invalid_filename.pkg"),
+            None
+        );
+        assert_eq!(
+            parse_package_name("foo-1.0-1.pkg.tar.zst"),
+            None
+        );
+    }
+}
+
 

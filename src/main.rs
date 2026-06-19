@@ -5,6 +5,8 @@ mod ui;
 mod backend;
 mod scanner;
 mod action;
+mod theme;
+
 fn translate_cyrillic(c: char) -> char {
     match c {
         // Lowercase
@@ -89,8 +91,15 @@ fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_availab
             }
         });
 
+        let tx_cache = tx.clone();
+        let t_cache = tokio::spawn(async move {
+            if let Ok(entries) = backend::paru::Paru::get_cache_entries_with_size().await {
+                tx_cache.send(Action::SetCacheEntries(entries)).ok();
+            }
+        });
+
         if !is_online {
-            let _ = tokio::join!(t1, t3, t5, t6);
+            let _ = tokio::join!(t1, t3, t5, t6, t_cache);
             tx.send(Action::SetStatus("⚠️ Offline Mode (Network connection failed)".to_string())).ok();
             return;
         }
@@ -99,9 +108,16 @@ fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_availab
 
         let tx2 = tx.clone();
         let t2 = tokio::spawn(async move {
-            if let Ok(Ok(updates)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::paru::Paru::get_updates()).await {
-                tx2.send(Action::SetUpdates(updates)).ok();
+            let mut all_updates = Vec::new();
+            if let Ok(Ok(mut updates)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::paru::Paru::get_updates()).await {
+                all_updates.append(&mut updates);
             }
+            if flatpak_available {
+                if let Ok(Ok(mut flatpak_updates)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::flatpak::Flatpak::get_updates()).await {
+                    all_updates.append(&mut flatpak_updates);
+                }
+            }
+            tx2.send(Action::SetUpdates(all_updates)).ok();
         });
 
         let tx4 = tx.clone();
@@ -113,7 +129,7 @@ fn spawn_refresh(tx: tokio::sync::mpsc::UnboundedSender<Action>, flatpak_availab
             }
         });
 
-        let _ = tokio::join!(t1, t2, t3, t4, t5, t6);
+        let _ = tokio::join!(t1, t2, t3, t4, t5, t6, t_cache);
         tx.send(Action::SetStatus("Ready".to_string())).ok();
     });
 }
@@ -162,7 +178,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Load config
-    let config = Config::load().unwrap_or_default();
+    let mut config = Config::load().unwrap_or_default();
+
+    // Run auto clean cache if enabled and interval has elapsed
+    if config.auto_clean_cache {
+        let now = chrono::Utc::now().timestamp() as u64;
+        let threshold = config.auto_clean_interval_days * 24 * 60 * 60;
+        if now >= config.last_cleanup_timestamp + threshold {
+            config.last_cleanup_timestamp = now;
+            config.save().ok();
+            tokio::spawn(async move {
+                let _ = backend::paru::Paru::clean_all_cache().await;
+            });
+        }
+    }
+
     let mut app = App::new(config);
 
     // Channel for actions
@@ -179,9 +209,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let tx8 = tx_load.clone();
         let t8 = tokio::spawn(async move {
+            let failed_count = match backend::systemd::get_failed_services().await {
+                Ok(list) => list.len() as u32,
+                Err(_) => 0,
+            };
             match backend::paru::Paru::get_system_info().await {
                 Ok(mut info) => {
                     info.is_online = is_online;
+                    info.failed_services_count = failed_count;
                     tx8.send(Action::SetSystemInfo(info)).ok();
                 }
                 Err(e) => { tx8.send(Action::Error(format!("Failed to load system info: {}", e))).ok(); }
@@ -230,17 +265,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let tx2 = tx_load.clone();
         let t2 = tokio::spawn(async move {
-            match tokio::time::timeout(std::time::Duration::from_secs(10), backend::paru::Paru::get_updates()).await {
-                Ok(Ok(updates)) => { tx2.send(Action::SetUpdates(updates)).ok(); }
-                _ => {}
+            let mut all_updates = Vec::new();
+            if let Ok(Ok(mut updates)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::paru::Paru::get_updates()).await {
+                all_updates.append(&mut updates);
             }
+            if backend::flatpak::Flatpak::is_available().await {
+                if let Ok(Ok(mut flatpak_updates)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::flatpak::Flatpak::get_updates()).await {
+                    all_updates.append(&mut flatpak_updates);
+                }
+            }
+            tx2.send(Action::SetUpdates(all_updates)).ok();
         });
 
         let tx3 = tx_load.clone();
         let t3 = tokio::spawn(async move {
-            match tokio::time::timeout(std::time::Duration::from_secs(10), backend::news::fetch_arch_news()).await {
-                Ok(Ok(news)) => { tx3.send(Action::SetNews(news)).ok(); }
-                _ => {}
+            if let Ok(Ok(news)) = tokio::time::timeout(std::time::Duration::from_secs(10), backend::news::fetch_arch_news()).await {
+                tx3.send(Action::SetNews(news)).ok();
             }
         });
 
@@ -294,6 +334,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 last_tick = Instant::now();
             }
+        }
+    });
+
+    // Spawn resource monitor loop
+    let tx_stats = tx.clone();
+    tokio::spawn(async move {
+        let mut prev_cpu = None;
+        loop {
+            if let Ok(stats) = backend::system::get_cpu_mem_stats(&mut prev_cpu).await {
+                if tx_stats.send(Action::SetCpuMemStats(stats)).is_err() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
     });
 
@@ -368,11 +422,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let tx_view = tx.clone();
                     app.status_message = Some(format!("Fetching PKGBUILD for {}...", pkg_name));
                     app.is_loading = true;
+
+                    let installed_ver = app.installed_packages.iter()
+                        .find(|p| p.name == pkg_name)
+                        .and_then(|p| p.installed_version.clone())
+                        .or_else(|| {
+                            app.updates.iter()
+                                .find(|u| u.name == pkg_name)
+                                .map(|u| u.old_version.clone())
+                        });
+
+                    let name_clone = pkg_name.clone();
                     tokio::spawn(async move {
-                        match backend::paru::Paru::get_pkgbuild(&pkg_name).await {
-                            Ok(content) => {
-                                let lines = backend::highlight::highlight_pkgbuild(&content);
-                                tx_view.send(Action::SetPkgbuildLines(lines)).ok();
+                        let raw_res = backend::paru::Paru::get_pkgbuild(&name_clone).await;
+                        let diff_res = backend::paru::Paru::get_pkgbuild_diff(&name_clone, installed_ver.as_deref()).await;
+
+                        match raw_res {
+                            Ok(raw_content) => {
+                                let diff_content = diff_res.unwrap_or_else(|e| format!("Could not generate diff: {}", e));
+                                tx_view.send(Action::SetPkgbuildData {
+                                    name: name_clone,
+                                    raw_content,
+                                    diff_content,
+                                }).ok();
                             }
                             Err(e) => {
                                 tx_view.send(Action::Error(format!("Failed to get PKGBUILD: {}", e))).ok();
@@ -380,12 +452,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                 }
-                Action::SetPkgbuildLines(lines) => {
+                Action::SetPkgbuildData { name, raw_content, diff_content } => {
                     app.is_loading = false;
-                    app.pkgbuild_lines = lines;
+                    app.pkgbuild_name = name;
+                    app.pkgbuild_raw_lines = backend::highlight::highlight_pkgbuild(&raw_content);
+
+                    if diff_content.starts_with("No differences") || diff_content.starts_with("Could not generate diff") {
+                        app.pkgbuild_diff_lines = vec![ratatui::text::Line::from(ratatui::text::Span::styled(
+                            diff_content.clone(),
+                            ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(160, 160, 180))
+                        ))];
+                    } else {
+                        app.pkgbuild_diff_lines = backend::highlight::highlight_diff(&diff_content);
+                    }
+
                     app.pkgbuild_scroll = 0;
+                    app.pkgbuild_view_mode = if diff_content.starts_with("No differences") || diff_content.starts_with("Could not generate diff") {
+                        app::PkgbuildViewMode::Full
+                    } else {
+                        app::PkgbuildViewMode::Diff
+                    };
                     app.route = app::Route::DiffViewer;
-                    app.status_message = Some("PKGBUILD loaded.".to_string());
+                    app.status_message = Some("PKGBUILD and diff loaded.".to_string());
+                }
+                Action::TogglePkgbuildViewMode => {
+                    app.pkgbuild_view_mode = match app.pkgbuild_view_mode {
+                        app::PkgbuildViewMode::Full => app::PkgbuildViewMode::Diff,
+                        app::PkgbuildViewMode::Diff => app::PkgbuildViewMode::Full,
+                    };
+                    app.pkgbuild_scroll = 0;
                 }
                 Action::InstallPackages(pkg_names) => {
                     if pkg_names.is_empty() {
@@ -504,8 +599,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.selected_packages.insert(name);
                     }
                 }
-                Action::UpdateSingle(pkg_name) => {
-                    tx.send(Action::InstallPackages(vec![pkg_name])).ok();
+                Action::UpdateSingle(update) => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    let status = if update.repository == "flatpak" {
+                        println!("\n>>> flatpak update -y {}\n", update.name);
+                        std::process::Command::new("flatpak")
+                            .args(["update", "-y", &update.name])
+                            .status()
+                    } else {
+                        println!("\n>>> paru -S {}\n", update.name);
+                        std::process::Command::new("paru")
+                            .args(["-S", &update.name])
+                            .status()
+                    };
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Upgrade completed successfully. Press Enter to return...");
+                        }
+                        Ok(s) => {
+                            println!("\n⚠️ Upgrade command exited with code: {}. Press Enter to return...", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to run upgrade: {}. Press Enter to return...", e);
+                        }
+                    }
+
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    spawn_refresh(tx.clone(), app.flatpak_available);
                 }
                 Action::UpdateAll => {
                     input_active.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -553,15 +696,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     spawn_refresh(tx.clone(), app.flatpak_available);
                 }
-                Action::CleanCache(name) => {
-                    app.status_message = Some(format!("Deleting cache for {}...", name));
+                Action::CleanCache(entry) => {
+                    app.status_message = Some(format!("Deleting cache for {}...", entry.name));
                     app.is_loading = true;
                     let tx_clean = tx.clone();
-                    let name_clone = name.clone();
+                    let entry_clone = entry.clone();
                     tokio::spawn(async move {
-                        match backend::paru::Paru::clean_cache(name_clone).await {
+                        match backend::paru::Paru::clean_cache(entry_clone).await {
                             Ok(_) => {
-                                tx_clean.send(Action::CleanCacheSuccess(name)).ok();
+                                tx_clean.send(Action::CleanCacheSuccess(entry.name)).ok();
                             }
                             Err(e) => {
                                 tx_clean.send(Action::Error(format!("Failed to clean cache: {}", e))).ok();
@@ -573,6 +716,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.is_loading = false;
                     app.cache_entries.retain(|c| c.name != name);
                     app.status_message = Some(format!("✅ Cache for '{}' deleted.", name));
+                    spawn_refresh(tx.clone(), app.flatpak_available);
                 }
                 Action::CleanAllCache => {
                     app.status_message = Some("Cleaning all cache...".to_string());
@@ -580,8 +724,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let tx_clean = tx.clone();
                     tokio::spawn(async move {
                         match backend::paru::Paru::clean_all_cache().await {
-                            Ok(_) => {
-                                tx_clean.send(Action::CleanAllCacheSuccess).ok();
+                            Ok(skipped) => {
+                                tx_clean.send(Action::CleanAllCacheSuccess(skipped)).ok();
                             }
                             Err(e) => {
                                 tx_clean.send(Action::Error(format!("Failed to clean cache: {}", e))).ok();
@@ -589,10 +733,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                 }
-                Action::CleanAllCacheSuccess => {
+                Action::CleanAllCacheSuccess(skipped) => {
                     app.is_loading = false;
                     app.cache_entries.clear();
-                    app.status_message = Some("✅ All cache cleaned.".to_string());
+                    if skipped {
+                        app.status_message = Some("✅ AUR cache cleaned. Pacman cache skipped (run with 'sudo' or use [c]/[C]).".to_string());
+                    } else {
+                        app.status_message = Some("✅ All cache cleaned.".to_string());
+                    }
+                    spawn_refresh(tx.clone(), app.flatpak_available);
                 }
                 Action::ShowConfirm(msg, action) => {
                     app.confirm_dialog = Some((msg, action));
@@ -769,8 +918,197 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Action::SetDiskStats(stats) => {
                     app.disk_stats = stats;
                 }
+                Action::SetCpuMemStats(stats) => {
+                    app.cpu_mem_stats = stats;
+                }
                 Action::SetSystemInfo(info) => {
                     app.system_info = info;
+                }
+                Action::SetFailedServices(services) => {
+                    app.failed_services = services;
+                    if app.failed_services.is_empty() {
+                        app.systemd_list_state.select(None);
+                        app.systemd_selected_logs.clear();
+                    } else {
+                        let selected = app.systemd_list_state.selected().unwrap_or(0);
+                        if selected >= app.failed_services.len() {
+                            app.systemd_list_state.select(Some(0));
+                            if let Some(first) = app.failed_services.first() {
+                                tx.send(Action::StartSystemdLogsLoad(first.unit.clone())).ok();
+                            }
+                        } else {
+                            app.systemd_list_state.select(Some(selected));
+                            if let Some(service) = app.failed_services.get(selected) {
+                                tx.send(Action::StartSystemdLogsLoad(service.unit.clone())).ok();
+                            }
+                        }
+                    }
+                }
+                Action::SetSystemdLogs(logs) => {
+                    app.systemd_logs_loading = false;
+                    app.systemd_selected_logs = logs;
+                }
+                Action::StartSystemdLogsLoad(service) => {
+                    app.systemd_logs_loading = true;
+                    let tx_logs = tx.clone();
+                    tokio::spawn(async move {
+                        let logs = backend::systemd::get_journal_logs(&service, 50).await.unwrap_or_else(|e| {
+                            vec![format!("Error loading logs: {}", e)]
+                        });
+                        tx_logs.send(Action::SetSystemdLogs(logs)).ok();
+                    });
+                }
+                Action::SystemdActionSuccess(msg) => {
+                    app.status_message = Some(msg);
+
+                    let tx_refresh = tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(list) = backend::systemd::get_failed_services().await {
+                            tx_refresh.send(Action::SetFailedServices(list)).ok();
+                        }
+                    });
+                    spawn_refresh(tx.clone(), app.flatpak_available);
+                }
+                Action::SystemdRestart(unit) => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n⚙️ Restarting systemd unit '{}'...", unit);
+                    println!(">>> sudo systemctl restart {}\n", unit);
+
+                    let status = std::process::Command::new("sudo")
+                        .args(["systemctl", "restart", &unit])
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Restarted successfully.");
+                            tx.send(Action::SystemdActionSuccess(format!("Unit {} restarted successfully", unit))).ok();
+                        }
+                        Ok(s) => {
+                            println!("\n⚠️ Command failed with code: {}.", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to execute: {}.", e);
+                        }
+                    }
+
+                    println!("\nPress Enter to return...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Action::SystemdStop(unit) => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n🛑 Stopping systemd unit '{}'...", unit);
+                    println!(">>> sudo systemctl stop {}\n", unit);
+
+                    let status = std::process::Command::new("sudo")
+                        .args(["systemctl", "stop", &unit])
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Stopped successfully.");
+                            tx.send(Action::SystemdActionSuccess(format!("Unit {} stopped successfully", unit))).ok();
+                        }
+                        Ok(s) => {
+                            println!("\n⚠️ Command failed with code: {}.", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to execute: {}.", e);
+                        }
+                    }
+
+                    println!("\nPress Enter to return...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Action::SystemdDisable(unit) => {
+                    input_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    while !input_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    println!("\n⚙️ Disabling systemd unit '{}'...", unit);
+                    println!(">>> sudo systemctl disable {}\n", unit);
+
+                    let status = std::process::Command::new("sudo")
+                        .args(["systemctl", "disable", &unit])
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("\n✅ Disabled successfully.");
+                            tx.send(Action::SystemdActionSuccess(format!("Unit {} disabled successfully", unit))).ok();
+                        }
+                        Ok(s) => {
+                            println!("\n⚠️ Command failed with code: {}.", s.code().unwrap_or(-1));
+                        }
+                        Err(e) => {
+                            println!("\n❌ Failed to execute: {}.", e);
+                        }
+                    }
+
+                    println!("\nPress Enter to return...");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+
+                    enable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        EnterAlternateScreen,
+                        EnableMouseCapture
+                    )?;
+                    terminal.clear()?;
+
+                    input_active.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Action::SystemUpgrade { use_snapper } => {
                     input_active.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -785,6 +1123,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         DisableMouseCapture
                     )?;
                     terminal.show_cursor()?;
+
+                    // Validate sudo credentials first
+                    println!("🔒 Validating sudo credentials...");
+                    let _ = std::process::Command::new("sudo").arg("-v").status();
 
                     let mut pre_num = String::new();
                     let mut snapper_success = false;
@@ -1096,22 +1438,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .status();
 
                     let status = if all {
-                        println!("\n>>> sudo pacman -Sc --noconfirm\n");
+                        println!("\n>>> yes | sudo pacman -Scc\n");
+                        std::process::Command::new("sh")
+                            .args(["-c", "yes | sudo pacman -Scc"])
+                            .status()
+                    } else if command_exists("paccache") {
+                        println!("\n>>> sudo paccache -r\n");
+                        std::process::Command::new("sudo")
+                            .args(["paccache", "-r"])
+                            .status()
+                    } else {
+                        println!("\n⚠️  paccache (pacman-contrib) not found. Falling back to pacman -Sc --noconfirm...\n");
                         std::process::Command::new("sudo")
                             .args(["pacman", "-Sc", "--noconfirm"])
                             .status()
-                    } else {
-                        if command_exists("paccache") {
-                            println!("\n>>> sudo paccache -r\n");
-                            std::process::Command::new("sudo")
-                                .args(["paccache", "-r"])
-                                .status()
-                        } else {
-                            println!("\n⚠️  paccache (pacman-contrib) not found. Falling back to pacman -Sc --noconfirm...\n");
-                            std::process::Command::new("sudo")
-                                .args(["pacman", "-Sc", "--noconfirm"])
-                                .status()
-                        }
                     };
 
                     match status {
@@ -1198,7 +1538,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else if app.route == app::Route::DiffViewer {
                         match key.code {
                             KeyCode::Char('j') | KeyCode::Down => {
-                                if app.pkgbuild_scroll + 1 < app.pkgbuild_lines.len() {
+                                let active_len = match app.pkgbuild_view_mode {
+                                    app::PkgbuildViewMode::Full => app.pkgbuild_raw_lines.len(),
+                                    app::PkgbuildViewMode::Diff => app.pkgbuild_diff_lines.len(),
+                                };
+                                if app.pkgbuild_scroll + 1 < active_len {
                                     app.pkgbuild_scroll += 1;
                                 }
                             }
@@ -1207,8 +1551,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.pkgbuild_scroll -= 1;
                                 }
                             }
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                tx.send(Action::TogglePkgbuildViewMode).ok();
+                            }
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 app.route = app::App::tab_route(app.tab_index);
+                            }
+                            _ => {}
+                        }
+                    } else if app.route == app::Route::PackageDetails {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.route = app::App::tab_route(app.tab_index);
+                            }
+                            KeyCode::Char('o') | KeyCode::Char('O') => {
+                                if let Some(ref pkg) = app.selected_package {
+                                    if let Some(ref url) = pkg.url {
+                                        if !url.is_empty() {
+                                            let _ = std::process::Command::new("xdg-open")
+                                                .arg(url)
+                                                .spawn();
+                                            app.status_message = Some(format!("Opening homepage: {}", url));
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('i') | KeyCode::Char('I') => {
+                                if let Some(ref pkg) = app.selected_package {
+                                    let name = pkg.name.clone();
+                                    tx.send(Action::ShowConfirm(
+                                        format!("Install package '{}'?", name),
+                                        Box::new(Action::InstallPackages(vec![name])),
+                                    )).ok();
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else if app.route == app::Route::Systemd {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.route = app::Route::Dashboard;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                let len = app.failed_services.len();
+                                if len > 0 {
+                                    let i = match app.systemd_list_state.selected() {
+                                        Some(i) => if i >= len - 1 { 0 } else { i + 1 },
+                                        None => 0,
+                                    };
+                                    app.systemd_list_state.select(Some(i));
+                                    if let Some(service) = app.failed_services.get(i) {
+                                        tx.send(Action::StartSystemdLogsLoad(service.unit.clone())).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                let len = app.failed_services.len();
+                                if len > 0 {
+                                    let i = match app.systemd_list_state.selected() {
+                                        Some(i) => if i == 0 { len - 1 } else { i - 1 },
+                                        None => 0,
+                                    };
+                                    app.systemd_list_state.select(Some(i));
+                                    if let Some(service) = app.failed_services.get(i) {
+                                        tx.send(Action::StartSystemdLogsLoad(service.unit.clone())).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                if let Some(i) = app.systemd_list_state.selected() {
+                                    if let Some(service) = app.failed_services.get(i) {
+                                        let unit = service.unit.clone();
+                                        tx.send(Action::ShowConfirm(
+                                            format!("Restart systemd unit '{}'?", unit),
+                                            Box::new(Action::SystemdRestart(unit)),
+                                        )).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                if let Some(i) = app.systemd_list_state.selected() {
+                                    if let Some(service) = app.failed_services.get(i) {
+                                        let unit = service.unit.clone();
+                                        tx.send(Action::ShowConfirm(
+                                            format!("Stop systemd unit '{}'?", unit),
+                                            Box::new(Action::SystemdStop(unit)),
+                                        )).ok();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                if let Some(i) = app.systemd_list_state.selected() {
+                                    if let Some(service) = app.failed_services.get(i) {
+                                        let unit = service.unit.clone();
+                                        tx.send(Action::ShowConfirm(
+                                            format!("Disable systemd unit '{}'?", unit),
+                                            Box::new(Action::SystemdDisable(unit)),
+                                        )).ok();
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -1259,6 +1700,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 app.orphans_list_state.select(Some(i));
                                             }
                                         }
+                                    } else if app.route == app::Route::Settings {
+                                        let total_items = 6 + app.config.risky_patterns.len() + 1;
+                                        app.settings_selected_index = (app.settings_selected_index + 1) % total_items;
                                     } else {
                                         app.select_next();
                                     }
@@ -1299,6 +1743,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 app.orphans_list_state.select(Some(i));
                                             }
                                         }
+                                    } else if app.route == app::Route::Settings {
+                                        let total_items = 6 + app.config.risky_patterns.len() + 1;
+                                        app.settings_selected_index = (app.settings_selected_index + total_items - 1) % total_items;
                                     } else {
                                         app.select_previous();
                                     }
@@ -1308,6 +1755,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         app.store_active_pane = 0;
                                     } else if app.route == app::Route::Cache {
                                         app.cache_active_pane = 0;
+                                    } else if app.route == app::Route::Settings {
+                                        if app.settings_selected_index == 0 {
+                                            let theme_options = ["default", "nord", "gruvbox", "dracula", "cyberpunk"];
+                                            let current_idx = theme_options.iter().position(|t| t.eq_ignore_ascii_case(&app.config.theme)).unwrap_or(0);
+                                            let new_idx = if current_idx == 0 { theme_options.len() - 1 } else { current_idx - 1 };
+                                            app.config.theme = theme_options[new_idx].to_string();
+                                            app.config.save().ok();
+                                            app.status_message = Some(format!("Theme changed to {}", theme_options[new_idx]));
+                                        } else if app.settings_selected_index == 4 {
+                                            app.config.auto_clean_cache = !app.config.auto_clean_cache;
+                                            app.config.save().ok();
+                                            app.status_message = Some(format!("Auto clean cache changed to {}", if app.config.auto_clean_cache { "On" } else { "Off" }));
+                                        }
                                     }
                                 }
                                 KeyCode::Char('l') | KeyCode::Right => {
@@ -1325,6 +1785,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 app.orphans_list_state.select(Some(0));
                                             }
                                         }
+                                    } else if app.route == app::Route::Settings {
+                                        if app.settings_selected_index == 0 {
+                                            let theme_options = ["default", "nord", "gruvbox", "dracula", "cyberpunk"];
+                                            let current_idx = theme_options.iter().position(|t| t.eq_ignore_ascii_case(&app.config.theme)).unwrap_or(0);
+                                            let new_idx = (current_idx + 1) % theme_options.len();
+                                            app.config.theme = theme_options[new_idx].to_string();
+                                            app.config.save().ok();
+                                            app.status_message = Some(format!("Theme changed to {}", theme_options[new_idx]));
+                                        } else if app.settings_selected_index == 4 {
+                                            app.config.auto_clean_cache = !app.config.auto_clean_cache;
+                                            app.config.save().ok();
+                                            app.status_message = Some(format!("Auto clean cache changed to {}", if app.config.auto_clean_cache { "On" } else { "Off" }));
+                                        }
                                     }
                                 }
                                 KeyCode::Tab => {
@@ -1339,7 +1812,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 KeyCode::Char(c) if c.is_ascii_digit() => {
                                     let digit = c.to_digit(10).unwrap() as usize;
-                                    if (1..=8).contains(&digit) {
+                                    if (1..=9).contains(&digit) {
                                         app.tab_index = digit - 1;
                                         app.route = app::App::tab_route(app.tab_index);
                                         app.list_state.select(None);
@@ -1462,7 +1935,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 // Install selected package(s) (Enter in Updates/Search/Store)
                                 KeyCode::Enter => {
-                                    if !app.selected_packages.is_empty() {
+                                    if !app.selected_packages.is_empty() && app.route != app::Route::Settings {
                                         let selected: Vec<String> = app.selected_packages.iter().cloned().collect();
                                         let count = selected.len();
                                         tx.send(Action::ShowConfirm(
@@ -1537,6 +2010,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                 }
                                             }
+                                            app::Route::Settings => {
+                                                match app.settings_selected_index {
+                                                    0 => {}
+                                                    1 => {
+                                                        app.input_mode = app::InputMode::Editing;
+                                                        app.settings_field_edit = Some(app::SettingsField::CheckInterval);
+                                                        app.settings_input = tui_input::Input::new(app.config.check_interval_minutes.to_string());
+                                                    }
+                                                    2 => {
+                                                        app.input_mode = app::InputMode::Editing;
+                                                        app.settings_field_edit = Some(app::SettingsField::MaxCacheSize);
+                                                        app.settings_input = tui_input::Input::new(app.config.max_cache_size_mb.to_string());
+                                                    }
+                                                    3 => {
+                                                        app.input_mode = app::InputMode::Editing;
+                                                        app.settings_field_edit = Some(app::SettingsField::AurUrl);
+                                                        app.settings_input = tui_input::Input::new(app.config.aur_rpc_url.clone());
+                                                    }
+                                                    4 => {}
+                                                    5 => {
+                                                        app.input_mode = app::InputMode::Editing;
+                                                        app.settings_field_edit = Some(app::SettingsField::AutoCleanInterval);
+                                                        app.settings_input = tui_input::Input::new(app.config.auto_clean_interval_days.to_string());
+                                                    }
+                                                    idx if idx >= 6 && idx < 6 + app.config.risky_patterns.len() => {
+                                                        let p_idx = idx - 6;
+                                                        app.input_mode = app::InputMode::Editing;
+                                                        app.settings_field_edit = Some(app::SettingsField::RiskyPattern(p_idx));
+                                                        app.settings_input = tui_input::Input::new(app.config.risky_patterns[p_idx].clone());
+                                                    }
+                                                    idx if idx == 6 + app.config.risky_patterns.len() => {
+                                                        app.input_mode = app::InputMode::Editing;
+                                                        app.settings_field_edit = Some(app::SettingsField::AddRiskyPattern);
+                                                        app.settings_input = tui_input::Input::default();
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -1549,7 +2060,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let name = u.name.clone();
                                                 tx.send(Action::ShowConfirm(
                                                     format!("Update '{}'?", name),
-                                                    Box::new(Action::UpdateSingle(name)),
+                                                    Box::new(Action::UpdateSingle(u.clone())),
                                                 )).ok();
                                             }
                                         }
@@ -1609,16 +2120,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Box::new(Action::TroubleshootInstallLtsKernel),
                                     )).ok();
                                 }
+                                KeyCode::Char('S') => {
+                                    app.route = app::Route::Systemd;
+                                    app.systemd_list_state.select(Some(0));
+                                    app.systemd_selected_logs.clear();
+
+                                    let tx_systemd = tx.clone();
+                                    app.is_loading = true;
+                                    tokio::spawn(async move {
+                                        if let Ok(list) = backend::systemd::get_failed_services().await {
+                                            if let Some(first) = list.first() {
+                                                tx_systemd.send(Action::StartSystemdLogsLoad(first.unit.clone())).ok();
+                                            }
+                                            tx_systemd.send(Action::SetFailedServices(list)).ok();
+                                        }
+                                    });
+                                }
                                 // Cache: delete selected / remove selected orphan package
                                 KeyCode::Char('d') => {
                                     if app.route == app::Route::Cache {
                                         if app.cache_active_pane == 0 {
                                             if let Some(i) = app.list_state.selected() {
                                                 if let Some(c) = app.cache_entries.get(i) {
-                                                    let name = c.name.clone();
+                                                    let entry = c.clone();
                                                     tx.send(Action::ShowConfirm(
-                                                        format!("Delete cache for '{}'?", name),
-                                                        Box::new(Action::CleanCache(name)),
+                                                        format!("Delete cache for '{}'?", entry.name),
+                                                        Box::new(Action::CleanCache(entry)),
                                                     )).ok();
                                                 }
                                             }
@@ -1639,6 +2166,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     format!("Uninstall Flatpak app '{}'?", a.name),
                                                     Box::new(Action::RemoveFlatpakApp(app_id)),
                                                 )).ok();
+                                            }
+                                        }
+                                    } else if app.route == app::Route::Settings {
+                                        let idx = app.settings_selected_index;
+                                        if idx >= 6 && idx < 6 + app.config.risky_patterns.len() {
+                                            let p_idx = idx - 6;
+                                            let deleted = app.config.risky_patterns.remove(p_idx);
+                                            app.config.save().ok();
+                                            app.status_message = Some(format!("Deleted pattern: {}", deleted));
+                                            let total_items = 6 + app.config.risky_patterns.len() + 1;
+                                            if app.settings_selected_index >= total_items {
+                                                app.settings_selected_index = total_items - 1;
                                             }
                                         }
                                     }
@@ -1673,7 +2212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 KeyCode::Char('C') => {
                                     if app.route == app::Route::Cache {
                                         tx.send(Action::ShowConfirm(
-                                            "Clean ALL unused pacman cache files?".to_string(),
+                                            "Clean ALL pacman cache files (including installed)?".to_string(),
                                             Box::new(Action::CleanPacmanCache(true)),
                                         )).ok();
                                     }
@@ -1696,46 +2235,157 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )).ok();
                                     }
                                 }
+                                KeyCode::Char('o') | KeyCode::Char('O') => {
+                                    if app.route == app::Route::News {
+                                        if let Some(idx) = app.list_state.selected() {
+                                            if let Some(news) = app.news_items.get(idx) {
+                                                let link = news.link.clone();
+                                                if !link.is_empty() {
+                                                    let _ = std::process::Command::new("xdg-open")
+                                                        .arg(&link)
+                                                        .spawn();
+                                                    app.status_message = Some(format!("Opening link: {}", link));
+                                                }
+                                            }
+                                        }
+                                    } else if app.route == app::Route::Search {
+                                        if let Some(idx) = app.list_state.selected() {
+                                            if app.search_source == app::SearchSource::Aur {
+                                                if let Some(pkg) = app.search_results.get(idx) {
+                                                    if let Some(ref url) = pkg.url {
+                                                        if !url.is_empty() {
+                                                            let _ = std::process::Command::new("xdg-open")
+                                                                .arg(url)
+                                                                .spawn();
+                                                            app.status_message = Some(format!("Opening homepage: {}", url));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 _ => {}
                             },
-                            app::InputMode::Editing => match key.code {
-                                KeyCode::Esc => {
-                                    app.input_mode = app::InputMode::Normal;
-                                }
-                                KeyCode::Enter => {
-                                    app.input_mode = app::InputMode::Normal;
-                                    let query = app.search_input.value().to_string();
-                                    if query.is_empty() {
-                                        continue;
-                                    }
-                                    let tx_search = tx.clone();
-                                    app.is_loading = true;
-
-                                    match app.search_source {
-                                        app::SearchSource::Aur => {
-                                            app.search_results.clear();
-                                            tokio::spawn(async move {
-                                                let aur = backend::aur::AurClient::new();
-                                                match aur.search(&query).await {
-                                                    Ok(pkgs) => tx_search.send(Action::SetSearchResults(pkgs)).ok(),
-                                                    Err(e) => tx_search.send(Action::Error(format!("Search failed: {}", e))).ok(),
-                                                };
-                                            });
+                            app::InputMode::Editing => {
+                                if app.route == app::Route::Settings {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            app.input_mode = app::InputMode::Normal;
+                                            app.settings_field_edit = None;
                                         }
-                                        app::SearchSource::Flatpak => {
-                                            app.flatpak_search_results.clear();
-                                            tokio::spawn(async move {
-                                                match backend::flatpak::Flatpak::search(&query).await {
-                                                    Ok(hits) => tx_search.send(Action::SetFlatpakSearchResults(hits)).ok(),
-                                                    Err(e) => tx_search.send(Action::Error(format!("Flathub search failed: {}", e))).ok(),
+                                        KeyCode::Enter => {
+                                            let value = app.settings_input.value().trim().to_string();
+                                            let mut success = true;
+                                            if let Some(ref field) = app.settings_field_edit {
+                                                match field {
+                                                    app::SettingsField::CheckInterval => {
+                                                        if let Ok(val) = value.parse::<u64>() {
+                                                            app.config.check_interval_minutes = val;
+                                                        } else {
+                                                            app.status_message = Some("Error: Check Interval must be a valid number".to_string());
+                                                            success = false;
+                                                        }
+                                                    }
+                                                    app::SettingsField::MaxCacheSize => {
+                                                        if let Ok(val) = value.parse::<u64>() {
+                                                            app.config.max_cache_size_mb = val;
+                                                        } else {
+                                                            app.status_message = Some("Error: Max Cache Size must be a valid number".to_string());
+                                                            success = false;
+                                                        }
+                                                    }
+                                                    app::SettingsField::AurUrl => {
+                                                        if !value.is_empty() {
+                                                            app.config.aur_rpc_url = value;
+                                                        } else {
+                                                            app.status_message = Some("Error: AUR RPC URL cannot be empty".to_string());
+                                                            success = false;
+                                                        }
+                                                    }
+                                                    app::SettingsField::AutoCleanInterval => {
+                                                        if let Ok(val) = value.parse::<u64>() {
+                                                            app.config.auto_clean_interval_days = val;
+                                                        } else {
+                                                            app.status_message = Some("Error: Auto Clean Interval must be a valid number".to_string());
+                                                            success = false;
+                                                        }
+                                                    }
+                                                    app::SettingsField::AutoCleanCache => {}
+                                                    app::SettingsField::RiskyPattern(p_idx) => {
+                                                        if !value.is_empty() {
+                                                            app.config.risky_patterns[*p_idx] = value;
+                                                        } else {
+                                                            app.status_message = Some("Error: Pattern cannot be empty".to_string());
+                                                            success = false;
+                                                        }
+                                                    }
+                                                    app::SettingsField::AddRiskyPattern => {
+                                                        if !value.is_empty() {
+                                                            app.config.risky_patterns.push(value);
+                                                        } else {
+                                                            app.status_message = Some("Error: Pattern cannot be empty".to_string());
+                                                            success = false;
+                                                        }
+                                                    }
                                                 }
-                                            });
+                                            }
+                                            if success {
+                                                if let Err(e) = app.config.save() {
+                                                    app.status_message = Some(format!("Error saving config: {}", e));
+                                                } else {
+                                                    app.status_message = Some("Configuration saved successfully!".to_string());
+                                                }
+                                                app.input_mode = app::InputMode::Normal;
+                                                app.settings_field_edit = None;
+                                            }
+                                        }
+                                        _ => {
+                                            use tui_input::backend::crossterm::EventHandler;
+                                            app.settings_input.handle_event(&crossterm::event::Event::Key(key));
                                         }
                                     }
-                                }
-                                _ => {
-                                    use tui_input::backend::crossterm::EventHandler;
-                                    app.search_input.handle_event(&crossterm::event::Event::Key(key));
+                                } else {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            app.input_mode = app::InputMode::Normal;
+                                        }
+                                        KeyCode::Enter => {
+                                            app.input_mode = app::InputMode::Normal;
+                                            let query = app.search_input.value().to_string();
+                                            if query.is_empty() {
+                                                continue;
+                                            }
+                                            let tx_search = tx.clone();
+                                            app.is_loading = true;
+
+                                            match app.search_source {
+                                                app::SearchSource::Aur => {
+                                                    app.search_results.clear();
+                                                    tokio::spawn(async move {
+                                                        let aur = backend::aur::AurClient::new();
+                                                        match aur.search(&query).await {
+                                                            Ok(pkgs) => tx_search.send(Action::SetSearchResults(pkgs)).ok(),
+                                                            Err(e) => tx_search.send(Action::Error(format!("Search failed: {}", e))).ok(),
+                                                        };
+                                                    });
+                                                }
+                                                app::SearchSource::Flatpak => {
+                                                    app.flatpak_search_results.clear();
+                                                    tokio::spawn(async move {
+                                                        match backend::flatpak::Flatpak::search(&query).await {
+                                                            Ok(hits) => tx_search.send(Action::SetFlatpakSearchResults(hits)).ok(),
+                                                            Err(e) => tx_search.send(Action::Error(format!("Flathub search failed: {}", e))).ok(),
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            use tui_input::backend::crossterm::EventHandler;
+                                            app.search_input.handle_event(&crossterm::event::Event::Key(key));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1798,6 +2448,139 @@ mod tests {
             assert_eq!(expand_tilde("~/Downloads"), home.join("Downloads"));
         }
     }
+
+    #[test]
+    fn test_theme_colors() {
+        use crate::theme::get_theme;
+        let t_nord = get_theme("nord");
+        assert_eq!(t_nord.name, "Nord");
+        
+        let t_dracula = get_theme("Dracula");
+        assert_eq!(t_dracula.name, "Dracula");
+
+        let t_default = get_theme("unknown");
+        assert_eq!(t_default.name, "Default");
+    }
+
+    #[test]
+    fn test_classify_target() {
+        // Test repository package names (non-path-like and don't exist)
+        assert_eq!(
+            classify_target("some-pkg-name"),
+            InstallTargetType::RepoPackage("some-pkg-name".to_string())
+        );
+
+        // Test non-existent path-like target
+        match classify_target("./nonexistent-pkg.pkg.tar.zst") {
+            InstallTargetType::Invalid(_, reason) => {
+                assert!(reason.contains("Path does not exist"));
+            }
+            other => panic!("Expected Invalid target, got {:?}", other),
+        }
+
+        // Test file format check for non-existent path
+        match classify_target("/foo/bar/badfile.txt") {
+            InstallTargetType::Invalid(_, reason) => {
+                assert!(reason.contains("Path does not exist"));
+            }
+            other => panic!("Expected Invalid target, got {:?}", other),
+        }
+
+        // Test creation of actual files/directories using a temp folder
+        let temp_dir = std::env::temp_dir().join("aurum_test_classify");
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // 1. Create a valid package file
+        let pkg_file = temp_dir.join("testpkg-1.0-1-x86_64.pkg.tar.zst");
+        let _ = std::fs::File::create(&pkg_file);
+        assert_eq!(
+            classify_target(&pkg_file.to_string_lossy()),
+            InstallTargetType::LocalPackageFile(pkg_file.clone())
+        );
+
+        // 2. Create an invalid file format
+        let invalid_file = temp_dir.join("testpkg.txt");
+        let _ = std::fs::File::create(&invalid_file);
+        match classify_target(&invalid_file.to_string_lossy()) {
+            InstallTargetType::Invalid(_, reason) => {
+                assert!(reason.contains("File is not a valid Arch"));
+            }
+            other => panic!("Expected Invalid target, got {:?}", other),
+        }
+
+        // 3. Create a PKGBUILD file directly
+        let pkgbuild_file = temp_dir.join("PKGBUILD");
+        let _ = std::fs::File::create(&pkgbuild_file);
+        assert_eq!(
+            classify_target(&pkgbuild_file.to_string_lossy()),
+            InstallTargetType::PkgbuildFile(pkgbuild_file.clone())
+        );
+
+        // 4. Create a PKGBUILD directory
+        let pkgbuild_dir = temp_dir.join("pkgbuild_dir");
+        let _ = std::fs::create_dir_all(&pkgbuild_dir);
+        let _ = std::fs::File::create(pkgbuild_dir.join("PKGBUILD"));
+        assert_eq!(
+            classify_target(&pkgbuild_dir.to_string_lossy()),
+            InstallTargetType::PkgbuildDir(pkgbuild_dir.clone())
+        );
+
+        // 5. Create a directory WITHOUT PKGBUILD
+        let empty_dir = temp_dir.join("empty_dir");
+        let _ = std::fs::create_dir_all(&empty_dir);
+        match classify_target(&empty_dir.to_string_lossy()) {
+            InstallTargetType::Invalid(_, reason) => {
+                assert!(reason.contains("Directory does not contain a PKGBUILD"));
+            }
+            other => panic!("Expected Invalid target, got {:?}", other),
+        }
+
+        // 6. Test Git URLs
+        assert_eq!(
+            classify_target("https://aur.archlinux.org/paru-git.git"),
+            InstallTargetType::GitUrl("https://aur.archlinux.org/paru-git.git".to_string())
+        );
+        assert_eq!(
+            classify_target("http://github.com/some/repo.git"),
+            InstallTargetType::GitUrl("http://github.com/some/repo.git".to_string())
+        );
+
+        // 7. Test Tarball URLs
+        assert_eq!(
+            classify_target("https://aur.archlinux.org/cgit/aur.git/snapshot/paru-git.tar.gz"),
+            InstallTargetType::TarballUrl("https://aur.archlinux.org/cgit/aur.git/snapshot/paru-git.tar.gz".to_string())
+        );
+        assert_eq!(
+            classify_target("https://example.com/package.tar.xz"),
+            InstallTargetType::TarballUrl("https://example.com/package.tar.xz".to_string())
+        );
+
+        // 8. Test Invalid URLs
+        match classify_target("https://google.com") {
+            InstallTargetType::Invalid(_, reason) => {
+                assert!(reason.contains("URL is neither a git repository"));
+            }
+            other => panic!("Expected Invalid target, got {:?}", other),
+        }
+
+        // Cleanup temp folder
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_is_pacman_installed() {
+        // 'pacman' package itself must be installed on Arch Linux/CachyOS systems
+        assert!(is_pacman_installed("pacman"));
+
+        // Non-existent package should not be installed
+        assert!(!is_pacman_installed("this-package-does-not-exist-12345"));
+    }
+
+    #[test]
+    fn test_is_snapper_available() {
+        // Should run without crashing, regardless of whether snapper is installed or not
+        let _ = is_snapper_available();
+    }
 }
 
 fn expand_tilde<P: AsRef<std::path::Path>>(path: P) -> std::path::PathBuf {
@@ -1815,6 +2598,109 @@ fn expand_tilde<P: AsRef<std::path::Path>>(path: P) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum InstallTargetType {
+    LocalPackageFile(std::path::PathBuf),
+    PkgbuildFile(std::path::PathBuf),
+    PkgbuildDir(std::path::PathBuf),
+    RepoPackage(String),
+    GitUrl(String),
+    TarballUrl(String),
+    Invalid(String, String), // target, reason
+}
+
+fn classify_target(target: &str) -> InstallTargetType {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        if target.ends_with(".tar.gz")
+            || target.ends_with(".tar.xz")
+            || target.ends_with(".tar.zst")
+            || target.ends_with(".zip")
+            || target.contains("/snapshot/")
+        {
+            InstallTargetType::TarballUrl(target.to_string())
+        } else if target.ends_with(".git") || target.contains("/aur.git/") || target.contains("/aur.git") {
+            InstallTargetType::GitUrl(target.to_string())
+        } else {
+            InstallTargetType::Invalid(
+                target.to_string(),
+                "URL is neither a git repository (.git) nor a supported archive (.tar.gz, .tar.xz, .tar.zst, .zip, or snapshot).".to_string()
+            )
+        }
+    } else {
+        let expanded = expand_tilde(target);
+        let path = std::path::Path::new(&expanded);
+        let is_path_like = target.contains('/') || target.contains('.') || target.starts_with('~');
+
+        if path.exists() {
+            if path.is_file() {
+                let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                if filename == "PKGBUILD" {
+                    InstallTargetType::PkgbuildFile(path.to_path_buf())
+                } else {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if ext == "zst" || ext == "xz" {
+                        InstallTargetType::LocalPackageFile(path.to_path_buf())
+                    } else {
+                        InstallTargetType::Invalid(target.to_string(), "File is not a valid Arch package archive (.pkg.tar.zst or .pkg.tar.xz) or PKGBUILD.".to_string())
+                    }
+                }
+            } else if path.is_dir() {
+                if path.join("PKGBUILD").exists() {
+                    InstallTargetType::PkgbuildDir(path.to_path_buf())
+                } else {
+                    InstallTargetType::Invalid(target.to_string(), "Directory does not contain a PKGBUILD file.".to_string())
+                }
+            } else {
+                InstallTargetType::Invalid(target.to_string(), "Path is neither a regular file nor a directory.".to_string())
+            }
+        } else if is_path_like {
+            InstallTargetType::Invalid(target.to_string(), "Path does not exist.".to_string())
+        } else {
+            InstallTargetType::RepoPackage(target.to_string())
+        }
+    }
+}
+
+fn is_pacman_installed(pkg: &str) -> bool {
+    std::process::Command::new("pacman")
+        .args(["-Q", pkg])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn is_snapper_available() -> bool {
+    let snapper_exists = std::process::Command::new("which")
+        .arg("snapper")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !snapper_exists {
+        return false;
+    }
+
+    let output = std::process::Command::new("snapper")
+        .arg("list-configs")
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines().any(|l| l.contains("root"))
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+
 async fn handle_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let cmd = args[1].as_str();
     if cmd == "install" || cmd == "i" {
@@ -1825,79 +2711,304 @@ async fn handle_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         }
 
         let targets = &args[2..];
-        
-        // If there's only one target, it might be a file or a PKGBUILD directory
-        if targets.len() == 1 {
-            let target = &targets[0];
-            let is_path_like = target.contains('/') || target.contains('.') || target.starts_with('~');
-            let expanded_path = expand_tilde(target);
-            let path = std::path::Path::new(&expanded_path);
-            
-            if is_path_like {
-                if !path.exists() {
-                    println!("❌ Error: Path '{}' does not exist.", path.display());
-                    std::process::exit(1);
-                }
-                
-                if path.is_file() {
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if ext == "zst" || ext == "xz" {
-                        println!("📦 Detected local Arch package archive: {}", path.display());
-                        println!(">>> sudo pacman -U {}", path.display());
-                        let status = std::process::Command::new("sudo")
-                            .args(["pacman", "-U", &path.to_string_lossy()])
-                            .status()?;
-                        if !status.success() {
-                            std::process::exit(status.code().unwrap_or(1));
-                        }
-                        return Ok(());
-                    } else {
-                        println!("❌ Error: File '{}' is not a valid Arch package archive (.pkg.tar.zst or .pkg.tar.xz).", path.display());
-                        std::process::exit(1);
-                    }
-                } else if path.is_dir() {
-                    if path.join("PKGBUILD").exists() {
-                        println!("🛠️ Detected PKGBUILD source directory: {}", path.display());
-                        
-                        // Safety check: makepkg cannot run as root
-                        let is_root = std::process::Command::new("id")
-                            .arg("-u")
-                            .output()
-                            .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
-                            .unwrap_or(false);
-                            
-                        if is_root {
-                            println!("\n❌ Error: You are running aurum as root/sudo.");
-                            println!("Building Arch packages (makepkg) as root is not allowed for security reasons.");
-                            println!("Please run this command without sudo:");
-                            println!("  aurum install {}", path.display());
-                            println!("Aurum will request password escalation automatically during installation.");
-                            std::process::exit(1);
-                        }
-                        
-                        println!(">>> makepkg -si (inside {})", path.display());
-                        let status = std::process::Command::new("makepkg")
-                            .args(["-si"])
-                            .current_dir(path)
-                            .status()?;
-                        if !status.success() {
-                            std::process::exit(status.code().unwrap_or(1));
-                        }
-                        return Ok(());
-                    } else {
-                        println!("⚠️ Error: Directory '{}' does not contain a PKGBUILD file.", path.display());
-                        std::process::exit(1);
-                    }
-                }
+        let mut local_packages = Vec::new();
+        let mut pkgbuild_dirs = Vec::new();
+        let mut pkgbuild_files = Vec::new();
+        let mut repo_packages = Vec::new();
+        let mut git_urls = Vec::new();
+        let mut tarball_urls = Vec::new();
+        let mut invalid_targets = Vec::new();
+
+        for target in targets {
+            match classify_target(target) {
+                InstallTargetType::LocalPackageFile(path) => local_packages.push(path),
+                InstallTargetType::PkgbuildFile(path) => pkgbuild_files.push(path),
+                InstallTargetType::PkgbuildDir(path) => pkgbuild_dirs.push(path),
+                InstallTargetType::RepoPackage(name) => repo_packages.push(name),
+                InstallTargetType::GitUrl(url) => git_urls.push(url),
+                InstallTargetType::TarballUrl(url) => tarball_urls.push(url),
+                InstallTargetType::Invalid(t, reason) => invalid_targets.push((t, reason)),
             }
         }
 
-        // Default to paru installation for package names
-        println!("🔍 Installing packages via paru: {}", targets.join(" "));
-        println!(">>> paru -S {}", targets.join(" "));
+        // 1. Check for invalid targets
+        if !invalid_targets.is_empty() {
+            for (target, reason) in invalid_targets {
+                println!("❌ Error: Invalid target '{}' - {}", target, reason);
+            }
+            std::process::exit(1);
+        }
+
+        // 2. Check for mixed targets
+        let has_local_pkg = !local_packages.is_empty();
+        let has_pkgbuild = !pkgbuild_dirs.is_empty() || !pkgbuild_files.is_empty();
+        let has_repo = !repo_packages.is_empty();
+        let has_git_url = !git_urls.is_empty();
+        let has_tarball_url = !tarball_urls.is_empty();
+
+        let mut types_count = 0;
+        if has_local_pkg { types_count += 1; }
+        if has_pkgbuild { types_count += 1; }
+        if has_repo { types_count += 1; }
+        if has_git_url { types_count += 1; }
+        if has_tarball_url { types_count += 1; }
+
+        if types_count > 1 {
+            println!("❌ Error: Mixed installation targets are not supported.");
+            println!("Please do not mix repository package names, local package files, PKGBUILD sources, or URLs in a single command.");
+            println!("Install them separately.");
+            std::process::exit(1);
+        }
+
+        // 3. Execute installation based on type
+        if has_local_pkg {
+            let files: Vec<String> = local_packages.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            println!("📦 Detected local Arch package archive(s):");
+            for f in &files {
+                println!("  • {}", f);
+                let metadata = std::process::Command::new("pacman")
+                    .args(["-Qip", f])
+                    .output();
+                match metadata {
+                    Ok(out) if out.status.success() => {
+                        let text = String::from_utf8_lossy(&out.stdout);
+                        for line in text.lines() {
+                            let l = line.trim();
+                            if l.starts_with("Name")
+                                || l.starts_with("Version")
+                                || l.starts_with("Description")
+                                || l.starts_with("Installed Size")
+                                || l.starts_with("Packager")
+                            {
+                                println!("    {}", l);
+                            }
+                        }
+                    }
+                    _ => {
+                        println!("    (Could not retrieve package metadata)");
+                    }
+                }
+            }
+
+            print!("\nDo you want to proceed with installation? [y/N] ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let reply = input.trim().to_lowercase();
+            if reply != "y" && reply != "yes" {
+                println!("Installation aborted.");
+                return Ok(());
+            }
+
+            println!("\n>>> sudo pacman -U {}", files.join(" "));
+            let status = std::process::Command::new("sudo")
+                .arg("pacman")
+                .arg("-U")
+                .args(&files)
+                .status()?;
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            return Ok(());
+        }
+
+        if has_pkgbuild {
+            // Safety check: makepkg cannot run as root
+            let is_root = std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+                .unwrap_or(false);
+                
+            if is_root {
+                println!("\n❌ Error: You are running aurum as root/sudo.");
+                println!("Building Arch packages (makepkg) as root is not allowed for security reasons.");
+                println!("Please run this command without sudo:");
+                println!("  aurum install [targets]");
+                println!("Aurum will request password escalation automatically during installation.");
+                std::process::exit(1);
+            }
+
+            // Build PKGBUILD files first
+            for file_path in &pkgbuild_files {
+                let dir = file_path.parent().unwrap_or(std::path::Path::new("."));
+                println!("🛠️ Detected PKGBUILD file: {}", file_path.display());
+                println!(">>> makepkg -si (inside {})", dir.display());
+                let status = std::process::Command::new("makepkg")
+                    .args(["-si"])
+                    .current_dir(dir)
+                    .status()?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+            }
+
+            // Build PKGBUILD directories
+            for dir_path in &pkgbuild_dirs {
+                println!("🛠️ Detected PKGBUILD source directory: {}", dir_path.display());
+                println!(">>> makepkg -si (inside {})", dir_path.display());
+                let status = std::process::Command::new("makepkg")
+                    .args(["-si"])
+                    .current_dir(dir_path)
+                    .status()?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+            }
+            
+            return Ok(());
+        }
+
+        if has_git_url {
+            // Safety check: makepkg cannot run as root
+            let is_root = std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+                .unwrap_or(false);
+                
+            if is_root {
+                println!("\n❌ Error: You are running aurum as root/sudo.");
+                println!("Building Arch packages (makepkg) as root is not allowed for security reasons.");
+                println!("Please run this command without sudo:");
+                println!("  aurum install [git-urls]");
+                std::process::exit(1);
+            }
+
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            let build_dir = home.join(".cache/aurum/cli_build");
+            std::fs::create_dir_all(&build_dir)?;
+
+            for git_url in &git_urls {
+                let repo_name = git_url
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("pkg")
+                    .strip_suffix(".git")
+                    .unwrap_or_else(|| git_url.split('/').next_back().unwrap_or("pkg"));
+                let dest = build_dir.join(repo_name);
+
+                if dest.exists() {
+                    let _ = std::fs::remove_dir_all(&dest);
+                }
+
+                println!("📥 Cloning git repository: {}", git_url);
+                println!(">>> git clone {} {}", git_url, dest.display());
+                let status = std::process::Command::new("git")
+                    .args(["clone", git_url, &dest.to_string_lossy()])
+                    .status()?;
+                if !status.success() {
+                    println!("❌ Error: Failed to clone git repository '{}'.", git_url);
+                    std::process::exit(1);
+                }
+
+                if !dest.join("PKGBUILD").exists() {
+                    println!("❌ Error: Cloned repository '{}' does not contain a PKGBUILD file.", repo_name);
+                    std::process::exit(1);
+                }
+
+                println!("🛠️ Building package...");
+                println!(">>> makepkg -si (inside {})", dest.display());
+                let status = std::process::Command::new("makepkg")
+                    .args(["-si"])
+                    .current_dir(&dest)
+                    .status()?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+            }
+            return Ok(());
+        }
+
+        if has_tarball_url {
+            // Safety check: makepkg cannot run as root
+            let is_root = std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+                .unwrap_or(false);
+                
+            if is_root {
+                println!("\n❌ Error: You are running aurum as root/sudo.");
+                println!("Building Arch packages (makepkg) as root is not allowed for security reasons.");
+                println!("Please run this command without sudo:");
+                println!("  aurum install [tarball-urls]");
+                std::process::exit(1);
+            }
+
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            let build_dir = home.join(".cache/aurum/cli_build");
+            std::fs::create_dir_all(&build_dir)?;
+
+            for tarball_url in &tarball_urls {
+                let filename = tarball_url.split('/').next_back().unwrap_or("archive.tar.gz");
+                let download_path = build_dir.join(filename);
+
+                println!("📥 Downloading archive: {}", tarball_url);
+                let response = reqwest::get(tarball_url).await?;
+                if !response.status().is_success() {
+                    println!("❌ Error: Failed to download archive from '{}'. Status: {}", tarball_url, response.status());
+                    std::process::exit(1);
+                }
+                let bytes = response.bytes().await?;
+                std::fs::write(&download_path, bytes)?;
+
+                println!("📦 Extracting archive...");
+                println!(">>> tar -xf {} -C {}", download_path.display(), build_dir.display());
+                let status = std::process::Command::new("tar")
+                    .args(["-xf", &download_path.to_string_lossy(), "-C", &build_dir.to_string_lossy()])
+                    .status()?;
+                if !status.success() {
+                    println!("❌ Error: Failed to extract archive.");
+                    std::process::exit(1);
+                }
+
+                // Locate the extracted directory containing PKGBUILD
+                let mut pkgbuild_dir = None;
+                if let Ok(entries) = std::fs::read_dir(&build_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() && path.join("PKGBUILD").exists() {
+                            pkgbuild_dir = Some(path);
+                            break;
+                        }
+                    }
+                }
+                if build_dir.join("PKGBUILD").exists() {
+                    pkgbuild_dir = Some(build_dir.to_path_buf());
+                }
+
+                if let Some(dir) = pkgbuild_dir {
+                    println!("🛠️ Building package...");
+                    println!(">>> makepkg -si (inside {})", dir.display());
+                    let status = std::process::Command::new("makepkg")
+                        .args(["-si"])
+                        .current_dir(&dir)
+                        .status()?;
+                    
+                    // Cleanup extracted directory and archive on success
+                    let _ = std::fs::remove_file(&download_path);
+                    let _ = std::fs::remove_dir_all(&dir);
+
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                } else {
+                    println!("❌ Error: Could not find a directory containing a PKGBUILD in the extracted archive.");
+                    let _ = std::fs::remove_file(&download_path);
+                    std::process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+
+        // Default: install via paru
+        println!("🔍 Installing packages via paru: {}", repo_packages.join(" "));
+        println!(">>> paru -S {}", repo_packages.join(" "));
         let status = std::process::Command::new("paru")
             .arg("-S")
-            .args(targets)
+            .args(&repo_packages)
             .status()?;
             
         if !status.success() {
@@ -1912,16 +3023,156 @@ async fn handle_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         }
 
         let targets = &args[2..];
-        println!("🗑️ Removing packages via paru: {}", targets.join(" "));
-        println!(">>> paru -Rns {}", targets.join(" "));
-        let status = std::process::Command::new("paru")
-            .arg("-Rns")
-            .args(targets)
-            .status()?;
-            
-        if !status.success() {
-            std::process::exit(status.code().unwrap_or(1));
+
+        // Fetch installed Flatpak application IDs
+        let mut installed_flatpaks = Vec::new();
+        if backend::flatpak::Flatpak::is_available().await {
+            if let Ok(list) = backend::flatpak::Flatpak::get_installed().await {
+                installed_flatpaks = list.into_iter().map(|app| app.app_id).collect::<Vec<String>>();
+            }
         }
+
+        let mut to_remove_pacman = Vec::new();
+        let mut to_remove_flatpak = Vec::new();
+        let mut not_installed = Vec::new();
+
+        for target in targets {
+            if is_pacman_installed(target) {
+                to_remove_pacman.push(target.to_string());
+            } else if installed_flatpaks.contains(&target.to_string()) {
+                to_remove_flatpak.push(target.to_string());
+            } else {
+                not_installed.push(target.to_string());
+            }
+        }
+
+        // Print styled summary
+        println!("📋 Uninstallation Plan:");
+        for pkg in &to_remove_pacman {
+            println!("  \x1b[32m•\x1b[0m {:<25} \x1b[36m[pacman]\x1b[0m       🗑️  Will be removed", pkg);
+        }
+        for pkg in &to_remove_flatpak {
+            println!("  \x1b[32m•\x1b[0m {:<25} \x1b[35m[flatpak]\x1b[0m      🗑️  Will be uninstalled", pkg);
+        }
+        for pkg in &not_installed {
+            println!("  \x1b[33m•\x1b[0m {:<25} \x1b[33m[not installed]\x1b[0m ⚠️  Skipped (not installed)", pkg);
+        }
+        println!();
+
+        if to_remove_pacman.is_empty() && to_remove_flatpak.is_empty() {
+            println!("⚠️ Notice: No installed packages selected for removal.");
+            std::process::exit(0);
+        }
+
+        if !not_installed.is_empty() {
+            println!("⚠️ Notice: Some specified packages are not installed and will be skipped.");
+        }
+
+        print!("Do you want to proceed with uninstallation? [y/N] ");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let reply = input.trim().to_lowercase();
+        if reply != "y" && reply != "yes" {
+            println!("Aborted.");
+            return Ok(());
+        }
+
+        // Execute Pacman removals
+        if !to_remove_pacman.is_empty() {
+            let use_snapper = if is_snapper_available() {
+                print!("Create Btrfs snapper snapshot and perform package removal? [y/N] ");
+                let _ = std::io::stdout().flush();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let reply = input.trim().to_lowercase();
+                reply == "y" || reply == "yes"
+            } else {
+                false
+            };
+
+            // Validate sudo credentials first
+            println!("🔒 Validating sudo credentials...");
+            let sudo_val = std::process::Command::new("sudo")
+                .arg("-v")
+                .status();
+            if let Ok(s) = sudo_val {
+                if !s.success() {
+                    println!("❌ Error: sudo validation failed.");
+                    std::process::exit(1);
+                }
+            } else {
+                println!("❌ Error: Failed to execute sudo.");
+                std::process::exit(1);
+            }
+
+            let mut pre_num = String::new();
+            let mut snapper_success = false;
+
+            if use_snapper {
+                println!("\n🔨 Creating Btrfs pre-removal snapshot (snapper)...");
+                let snapper_out = std::process::Command::new("sudo")
+                    .args(["snapper", "-c", "root", "create", "--type", "pre", "--print-number", "--description", "Before Aurum Package Removal"])
+                    .output();
+                match snapper_out {
+                    Ok(out) if out.status.success() => {
+                        pre_num = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        println!("✅ Pre-removal snapshot created (ID: {}).", pre_num);
+                        snapper_success = true;
+                    }
+                    Ok(out) => {
+                        println!("⚠️  Failed to create snapper snapshot: {}", String::from_utf8_lossy(&out.stderr));
+                    }
+                    Err(e) => {
+                        println!("⚠️  Failed to execute snapper: {}", e);
+                    }
+                }
+            }
+
+            println!("\n>>> sudo pacman -Rns {}\n", to_remove_pacman.join(" "));
+            let status = std::process::Command::new("sudo")
+                .arg("pacman")
+                .arg("-Rns")
+                .args(&to_remove_pacman)
+                .status()?;
+
+            let remove_success = status.success();
+
+            if remove_success && snapper_success && !pre_num.is_empty() {
+                println!("\n🔨 Creating Btrfs post-removal snapshot (snapper)...");
+                let snapper_post = std::process::Command::new("sudo")
+                    .args(["snapper", "-c", "root", "create", "--type", "post", "--pre-number", &pre_num, "--description", "After Aurum Package Removal"])
+                    .status();
+                match snapper_post {
+                    Ok(s) if s.success() => {
+                        println!("✅ Post-removal snapshot created.");
+                    }
+                    _ => {
+                        println!("⚠️  Failed to create post-removal snapshot.");
+                    }
+                }
+            }
+
+            if !remove_success {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+
+        // Execute Flatpak removals
+        if !to_remove_flatpak.is_empty() {
+            println!("\n>>> flatpak uninstall -y {}\n", to_remove_flatpak.join(" "));
+            let status = std::process::Command::new("flatpak")
+                .args(["uninstall", "-y"])
+                .args(&to_remove_flatpak)
+                .status()?;
+
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+
+        println!("\n✅ Uninstallation process finished successfully.");
         Ok(())
     } else if cmd == "--help" || cmd == "-h" || cmd == "help" {
         print_usage();

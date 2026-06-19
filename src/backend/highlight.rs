@@ -63,3 +63,68 @@ pub fn highlight_pkgbuild(content: &str) -> Vec<Line<'static>> {
 
     lines
 }
+
+pub fn highlight_diff(content: &str) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let mut spans = Vec::new();
+        let mut style = RatatuiStyle::default();
+
+        if line.starts_with('+') && !line.starts_with("+++") {
+            style = style.fg(Color::Rgb(100, 220, 100)); // green -> success_fg
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            style = style.fg(Color::Rgb(255, 100, 100)); // red -> error_fg
+        } else if line.starts_with("@@") {
+            style = style.fg(Color::Rgb(100, 160, 255)).add_modifier(Modifier::BOLD); // blue/cyan -> accent_fg
+        } else if line.starts_with("diff") || line.starts_with("index") || line.starts_with("---") || line.starts_with("+++") {
+            style = style.fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD); // yellow/orange -> header_fg
+        } else {
+            style = style.fg(Color::Rgb(200, 200, 220)); // normal text -> text_fg
+        }
+
+        spans.push(Span::styled(line.to_string(), style));
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_highlight_diff() {
+        let diff_content = "diff --git a/PKGBUILD b/PKGBUILD\n\
+                            --- a/PKGBUILD\n\
+                            +++ b/PKGBUILD\n\
+                            @@ -1,4 +1,4 @@\n\
+                            -pkgver=1.0.0\n\
+                            +pkgver=1.1.0\n\
+                             pkgrel=1";
+
+        let lines = highlight_diff(diff_content);
+        assert_eq!(lines.len(), 7);
+
+        let diff_span = &lines[0].spans[0];
+        assert_eq!(diff_span.content, "diff --git a/PKGBUILD b/PKGBUILD");
+        assert_eq!(diff_span.style.fg, Some(Color::Rgb(255, 200, 80)));
+
+        let hunk_span = &lines[3].spans[0];
+        assert_eq!(hunk_span.content, "@@ -1,4 +1,4 @@");
+        assert_eq!(hunk_span.style.fg, Some(Color::Rgb(100, 160, 255)));
+
+        let del_span = &lines[4].spans[0];
+        assert_eq!(del_span.content, "-pkgver=1.0.0");
+        assert_eq!(del_span.style.fg, Some(Color::Rgb(255, 100, 100)));
+
+        let add_span = &lines[5].spans[0];
+        assert_eq!(add_span.content, "+pkgver=1.1.0");
+        assert_eq!(add_span.style.fg, Some(Color::Rgb(100, 220, 100)));
+
+        let normal_span = &lines[6].spans[0];
+        assert_eq!(normal_span.content, "pkgrel=1");
+        assert_eq!(normal_span.style.fg, Some(Color::Rgb(200, 200, 220)));
+    }
+}
+
+

@@ -1,4 +1,4 @@
-use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry, DiskStats, SystemInfo};
+use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry, DiskStats, SystemInfo, CpuMemStats, FailedService};
 use crate::backend::flatpak::{FlatpakApp, FlatpakSearchApp};
 
 #[allow(dead_code)]
@@ -21,23 +21,28 @@ pub enum Action {
     Key(crossterm::event::KeyEvent),
     ScanPackage(String),
     ViewPkgbuild(String),
-    SetPkgbuildLines(Vec<ratatui::text::Line<'static>>),
+    SetPkgbuildData {
+        name: String,
+        raw_content: String,
+        diff_content: String,
+    },
+    TogglePkgbuildViewMode,
     // New: Package operations
     InstallPackages(Vec<String>),
     RemovePackages(Vec<String>),
     SetOrphans(Vec<Package>),
     ToggleSelect(String),
     UpdateAll,
-    UpdateSingle(String),
+    UpdateSingle(Update),
     SetPackageInfo(Package),
     // New: News
     SetNews(Vec<NewsItem>),
     // New: Cache
     SetCacheEntries(Vec<CacheEntry>),
-    CleanCache(String),
+    CleanCache(CacheEntry),
     CleanCacheSuccess(String),
     CleanAllCache,
-    CleanAllCacheSuccess,
+    CleanAllCacheSuccess(bool),
     // New: Confirm dialog
     ShowConfirm(String, Box<Action>),
     ConfirmYes,
@@ -62,5 +67,13 @@ pub enum Action {
     TroubleshootRemoveLock,
     TroubleshootUpdateMirrors,
     TroubleshootInstallLtsKernel,
+    SetCpuMemStats(CpuMemStats),
+    SetFailedServices(Vec<FailedService>),
+    SetSystemdLogs(Vec<String>),
+    StartSystemdLogsLoad(String),
+    SystemdActionSuccess(String),
+    SystemdRestart(String),
+    SystemdStop(String),
+    SystemdDisable(String),
 }
 

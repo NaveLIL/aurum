@@ -28,6 +28,9 @@ pub struct Config {
     pub max_cache_size_mb: u64,
     pub risky_patterns: Vec<String>,
     pub theme: String,
+    pub auto_clean_cache: bool,
+    pub auto_clean_interval_days: u64,
+    pub last_cleanup_timestamp: u64,
 }
 
 impl Default for Config {
@@ -45,6 +48,9 @@ impl Default for Config {
                 r"sudo\s+".to_string(),
             ],
             theme: "default".to_string(),
+            auto_clean_cache: false,
+            auto_clean_interval_days: 7,
+            last_cleanup_timestamp: 0,
         }
     }
 }

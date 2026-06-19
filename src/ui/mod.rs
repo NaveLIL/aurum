@@ -2,11 +2,34 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Line},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap, ListState},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap, ListState, LineGauge},
     Frame,
 };
-use crate::app::{App, Route, InputMode, InstalledSource, SearchSource};
+use crate::app::{App, Route, InputMode, InstalledSource, SearchSource, SettingsField};
 use crate::backend::paru::format_size;
+
+fn tc(app: &App, color: Color) -> Color {
+    let theme = app.theme();
+    match color {
+        // Yellows/Oranges (Header / Warning)
+        Color::Rgb(255, 200, 50) | Color::Rgb(255, 220, 80) | Color::Rgb(255, 200, 80) => theme.header_fg,
+        Color::Rgb(255, 200, 100) => theme.warning_fg,
+        // Greens (Success)
+        Color::Rgb(100, 220, 100) => theme.success_fg,
+        // Blues/Cyans (Accent / Repo)
+        Color::Rgb(80, 180, 255) | Color::Rgb(100, 160, 255) | Color::Rgb(100, 220, 255) => theme.accent_fg,
+        // Reds (Error / Lock)
+        Color::Rgb(255, 100, 100) | Color::Rgb(255, 80, 80) | Color::Rgb(255, 120, 50) => theme.error_fg,
+        // Text / Gray (Foreground)
+        Color::Rgb(200, 180, 255) | Color::Rgb(200, 200, 220) | Color::Rgb(160, 180, 220) | Color::Rgb(229, 233, 240) => theme.text_fg,
+        // Borders / Dims
+        Color::Rgb(120, 120, 140) | Color::Rgb(60, 60, 80) | Color::Rgb(140, 140, 160) => theme.border_fg,
+        // Flatpak Magenta
+        Color::Rgb(200, 100, 255) => theme.accent_fg,
+        c => c,
+    }
+}
+
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -34,14 +57,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
-    let tab_names = ["Dashboard", "Updates", "Installed", "Search", "Store", "News", "Cache", "Scanner"];
+    let theme = app.theme();
+    let tab_names = ["Dashboard", "Updates", "Installed", "Search", "Store", "News", "Cache", "Scanner", "Settings"];
     let titles: Vec<Line> = tab_names
         .iter()
         .map(|t| {
             let (first, rest) = t.split_at(1);
             Line::from(vec![
-                Span::styled(first, Style::default().fg(Color::Rgb(255, 200, 50))),
-                Span::styled(rest, Style::default().fg(Color::Rgb(100, 220, 100))),
+                Span::styled(first, Style::default().fg(tc(app, Color::Rgb(255, 200, 50)))),
+                Span::styled(rest, Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))),
             ])
         })
         .collect();
@@ -50,19 +74,21 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border_fg))
                 .title(Span::styled(
                     " 📦 Aurum ",
-                    Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD),
                 )),
         )
         .select(app.tab_index)
-        .style(Style::default().fg(Color::Rgb(120, 120, 140)))
+        .style(Style::default().fg(theme.border_fg))
         .highlight_style(
             Style::default()
                 .add_modifier(Modifier::BOLD)
-                .fg(Color::Rgb(255, 220, 80)),
+                .fg(theme.highlight_fg)
+                .bg(theme.highlight_bg),
         )
-        .divider(Span::styled(" │ ", Style::default().fg(Color::Rgb(60, 60, 80))));
+        .divider(Span::styled(" │ ", Style::default().fg(theme.border_fg)));
 
     f.render_widget(tabs, area);
 }
@@ -78,10 +104,13 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         Route::Cache => draw_cache(f, app, area),
         Route::Scanner => draw_scanner(f, app, area),
         Route::DiffViewer => draw_pkgbuild_viewer(f, app, area),
-        _ => draw_placeholder(f, area),
+        Route::PackageDetails => draw_placeholder(f, area),
+        Route::Settings => draw_settings(f, app, area),
+        Route::Systemd => draw_systemd_viewer(f, app, area),
     }
 }
 fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -95,7 +124,7 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
 
     let status_block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" ⚡ Status ", Style::default().fg(Color::Rgb(80, 180, 255))));
+        .title(Span::styled(" ⚡ Status ", Style::default().fg(tc(app, Color::Rgb(80, 180, 255)))));
 
     let updates_count = app.updates.len();
     let installed_count = app.installed_packages.len();
@@ -116,27 +145,27 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(
                 updates_count.to_string(),
                 Style::default()
-                    .fg(if updates_count > 0 { Color::Rgb(255, 100, 100) } else { Color::Rgb(100, 220, 100) })
+                    .fg(if updates_count > 0 { tc(app, Color::Rgb(255, 100, 100)) } else { tc(app, Color::Rgb(100, 220, 100)) })
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::raw("  Installed (AUR):   "),
-            Span::styled(installed_count.to_string(), Style::default().fg(Color::Rgb(100, 160, 255))),
+            Span::styled(installed_count.to_string(), Style::default().fg(tc(app, Color::Rgb(100, 160, 255)))),
         ]),
         Line::from(vec![
             Span::raw("  News Items:        "),
-            Span::styled(news_count.to_string(), Style::default().fg(Color::Rgb(200, 180, 255))),
+            Span::styled(news_count.to_string(), Style::default().fg(tc(app, Color::Rgb(200, 180, 255)))),
         ]),
         Line::from(vec![
             Span::raw("  Cache Size:        "),
-            Span::styled(format_size(cache_total), Style::default().fg(Color::Rgb(255, 200, 100))),
+            Span::styled(format_size(cache_total), Style::default().fg(tc(app, Color::Rgb(255, 200, 100)))),
         ]),
         Line::from(vec![
             Span::raw("  Last Checked:      "),
-            Span::styled(last_check, Style::default().fg(Color::Rgb(140, 140, 160))),
+            Span::styled(last_check, Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
         ]),
-        Line::from(Span::styled(loading_indicator, Style::default().fg(Color::Rgb(255, 220, 80)))),
+        Line::from(Span::styled(loading_indicator, Style::default().fg(tc(app, Color::Rgb(255, 220, 80))))),
     ];
 
     let paragraph = Paragraph::new(text).block(status_block);
@@ -145,15 +174,15 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     // Recent news preview
     let news_block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" 📰 Latest News ", Style::default().fg(Color::Rgb(200, 180, 255))));
+        .title(Span::styled(" 📰 Latest News ", Style::default().fg(tc(app, Color::Rgb(200, 180, 255)))));
 
     let news_text: Vec<Line> = if app.news_items.is_empty() {
         vec![Line::from("  Loading news...")]
     } else {
         app.news_items.iter().take(3).map(|n| {
             Line::from(vec![
-                Span::styled("  • ", Style::default().fg(Color::Rgb(255, 200, 100))),
-                Span::styled(n.title.chars().take(50).collect::<String>(), Style::default().fg(Color::Rgb(200, 200, 220))),
+                Span::styled("  • ", Style::default().fg(tc(app, Color::Rgb(255, 200, 100)))),
+                Span::styled(n.title.chars().take(50).collect::<String>(), Style::default().fg(tc(app, Color::Rgb(200, 200, 220)))),
             ])
         }).collect()
     };
@@ -161,29 +190,30 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     let news_para = Paragraph::new(news_text).block(news_block);
     f.render_widget(news_para, left_chunks[1]);
 
-    // Right: System Health (Top) & Keyboard Quick Help (Bottom)
+    // Right: System Health (Top), System Resources (Middle), Keyboard Quick Help (Bottom)
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(11), // System Health & Upgrade Alert
+            Constraint::Length(9),  // System Resources (CPU/Memory gauges)
             Constraint::Min(0),     // Keyboard Help
         ])
         .split(chunks[1]);
 
     let health_block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" 🩺 System Health ", Style::default().fg(Color::Rgb(100, 220, 100))));
+        .title(Span::styled(" 🩺 System Health ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))));
 
     let mut health_lines = Vec::new();
     health_lines.push(Line::from(""));
 
     let days = app.system_info.last_upgrade_days;
     let age_style = if days > 14 {
-        Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD)
+        Style::default().fg(tc(app, Color::Rgb(255, 80, 80))).add_modifier(Modifier::BOLD)
     } else if days > 7 {
-        Style::default().fg(Color::Rgb(255, 200, 80))
+        Style::default().fg(tc(app, Color::Rgb(255, 200, 80)))
     } else {
-        Style::default().fg(Color::Rgb(100, 220, 100))
+        Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))
     };
 
     health_lines.push(Line::from(vec![
@@ -196,12 +226,12 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.system_info.pacman_lock_exists {
         health_lines.push(Line::from(vec![
-            Span::styled("  ⚠️  Database Lock Active!", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  ⚠️  Database Lock Active!", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
         ]));
     } else {
         health_lines.push(Line::from(vec![
             Span::raw("  Database Lock: "),
-            Span::styled("None", Style::default().fg(Color::Rgb(100, 220, 100))),
+            Span::styled("None", Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))),
         ]));
     }
 
@@ -209,7 +239,7 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
         Span::raw("  Btrfs Snapper: "),
         Span::styled(
             if app.system_info.snapper_available { "Configured & Active (root)" } else { "Not Available" },
-            Style::default().fg(if app.system_info.snapper_available { Color::Rgb(100, 220, 100) } else { Color::Rgb(140, 140, 160) }),
+            Style::default().fg(if app.system_info.snapper_available { tc(app, Color::Rgb(100, 220, 100)) } else { tc(app, Color::Rgb(140, 140, 160)) }),
         ),
     ]));
 
@@ -218,11 +248,11 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     health_lines.push(Line::from(vec![
         Span::raw("  Backup Kernel: "),
         if has_lts {
-            Span::styled("Configured (LTS)", Style::default().fg(Color::Rgb(100, 220, 100)))
+            Span::styled("Configured (LTS)", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))))
         } else if multiple_kernels {
-            Span::styled("Configured (Multiple)", Style::default().fg(Color::Rgb(255, 200, 80)))
+            Span::styled("Configured (Multiple)", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))))
         } else {
-            Span::styled("⚠️ None (Press Shift-B to fix)", Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD))
+            Span::styled("⚠️ None (Press Shift-B to fix)", Style::default().fg(tc(app, Color::Rgb(255, 80, 80))).add_modifier(Modifier::BOLD))
         }
     ]));
 
@@ -231,9 +261,9 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     health_lines.push(Line::from(vec![
         Span::raw("  Pacman Cache:  "),
         if pacman_cache > cache_limit {
-            Span::styled(format!("⚠️ {} (Large)", format_size(pacman_cache)), Style::default().fg(Color::Rgb(255, 120, 50)).add_modifier(Modifier::BOLD))
+            Span::styled(format!("⚠️ {} (Large)", format_size(pacman_cache)), Style::default().fg(tc(app, Color::Rgb(255, 120, 50))).add_modifier(Modifier::BOLD))
         } else {
-            Span::styled(format_size(pacman_cache), Style::default().fg(Color::Rgb(100, 220, 100)))
+            Span::styled(format_size(pacman_cache), Style::default().fg(tc(app, Color::Rgb(100, 220, 100))))
         }
     ]));
 
@@ -243,64 +273,203 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
         health_lines.push(Line::from(vec![
             Span::raw("  Disk Free:     "),
             if free_space < space_limit {
-                Span::styled(format!("⚠️ {} (Low!)", format_size(free_space)), Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD))
+                Span::styled(format!("⚠️ {} (Low!)", format_size(free_space)), Style::default().fg(tc(app, Color::Rgb(255, 80, 80))).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(format_size(free_space), Style::default().fg(Color::Rgb(100, 220, 100)))
+                Span::styled(format_size(free_space), Style::default().fg(tc(app, Color::Rgb(100, 220, 100))))
             }
         ]));
     }
 
+    let failed_services = app.system_info.failed_services_count;
+    health_lines.push(Line::from(vec![
+        Span::raw("  Failed Units:  "),
+        if failed_services > 0 {
+            Span::styled(format!("⚠️ {} (Shift-S to fix)", failed_services), Style::default().fg(tc(app, Color::Rgb(255, 80, 80))).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled("0", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))))
+        }
+    ]));
+
+
     let health_para = Paragraph::new(health_lines).block(health_block);
     f.render_widget(health_para, right_chunks[0]);
 
+    // System Resources Panel
+    let resources_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_fg))
+        .title(Span::styled(" 🖥️ System Resources ", Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD)));
+
+    let inner_area = resources_block.inner(right_chunks[1]);
+    let resource_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // CPU Row
+            Constraint::Length(1), // Spacing
+            Constraint::Length(1), // RAM Row
+            Constraint::Length(1), // Spacing
+            Constraint::Length(1), // Swap Row
+        ])
+        .split(inner_area);
+
+    f.render_widget(resources_block, right_chunks[1]);
+
+    // Render CPU
+    {
+        let row_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(6),   // " CPU  "
+                Constraint::Min(5),      // Gauge
+                Constraint::Length(22),  // " 8.0% (25.0°C)"
+            ])
+            .split(resource_layout[0]);
+
+        let cpu_label = Paragraph::new(Span::styled(" CPU  ", Style::default().fg(theme.text_fg).add_modifier(Modifier::BOLD)));
+        
+        let cpu_temp_str = app.cpu_mem_stats.cpu_temp_c.map_or("".to_string(), |t| format!(" ({:.1}°C)", t));
+        let cpu_stats = Line::from(vec![
+            Span::styled(format!("{:.1}%", app.cpu_mem_stats.cpu_usage), Style::default().fg(theme.success_fg).add_modifier(Modifier::BOLD)),
+            Span::styled(cpu_temp_str, Style::default().fg(theme.warning_fg)),
+        ]);
+        let cpu_stats_para = Paragraph::new(cpu_stats).alignment(ratatui::layout::Alignment::Right);
+
+        let cpu_gauge = LineGauge::default()
+            .gauge_style(Style::default().fg(theme.accent_fg).bg(theme.border_fg))
+            .line_set(ratatui::symbols::line::THICK)
+            .ratio((app.cpu_mem_stats.cpu_usage / 100.0).clamp(0.0, 1.0))
+            .label("");
+
+        f.render_widget(cpu_label, row_chunks[0]);
+        f.render_widget(cpu_gauge, row_chunks[1]);
+        f.render_widget(cpu_stats_para, row_chunks[2]);
+    }
+
+    // Render RAM
+    {
+        let row_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(6),   // " RAM  "
+                Constraint::Min(5),      // Gauge
+                Constraint::Length(22),  // "14.9% (4.6G/31.0G)"
+            ])
+            .split(resource_layout[2]);
+
+        let ram_label = Paragraph::new(Span::styled(" RAM  ", Style::default().fg(theme.text_fg).add_modifier(Modifier::BOLD)));
+
+        let mem_used_gb = app.cpu_mem_stats.mem_used_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        let mem_total_gb = app.cpu_mem_stats.mem_total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        let mem_ratio = if app.cpu_mem_stats.mem_total_bytes > 0 {
+            app.cpu_mem_stats.mem_used_bytes as f64 / app.cpu_mem_stats.mem_total_bytes as f64
+        } else {
+            0.0
+        };
+
+        let ram_stats = Line::from(vec![
+            Span::styled(format!("{:.1}%", mem_ratio * 100.0), Style::default().fg(theme.success_fg).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({:.1}G/{:.1}G)", mem_used_gb, mem_total_gb), Style::default().fg(theme.text_fg).add_modifier(Modifier::DIM)),
+        ]);
+        let ram_stats_para = Paragraph::new(ram_stats).alignment(ratatui::layout::Alignment::Right);
+
+        let ram_gauge = LineGauge::default()
+            .gauge_style(Style::default().fg(theme.accent_fg).bg(theme.border_fg))
+            .line_set(ratatui::symbols::line::THICK)
+            .ratio(mem_ratio.clamp(0.0, 1.0))
+            .label("");
+
+        f.render_widget(ram_label, row_chunks[0]);
+        f.render_widget(ram_gauge, row_chunks[1]);
+        f.render_widget(ram_stats_para, row_chunks[2]);
+    }
+
+    // Render SWAP
+    {
+        let row_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(6),   // " SWAP "
+                Constraint::Min(5),      // Gauge
+                Constraint::Length(22),  // " 5.8% (1.8G/31.0G)"
+            ])
+            .split(resource_layout[4]);
+
+        let swap_label = Paragraph::new(Span::styled(" SWAP ", Style::default().fg(theme.text_fg).add_modifier(Modifier::BOLD)));
+
+        let swap_used_gb = app.cpu_mem_stats.swap_used_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        let swap_total_gb = app.cpu_mem_stats.swap_total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        let swap_ratio = if app.cpu_mem_stats.swap_total_bytes > 0 {
+            app.cpu_mem_stats.swap_used_bytes as f64 / app.cpu_mem_stats.swap_total_bytes as f64
+        } else {
+            0.0
+        };
+
+        let swap_stats = Line::from(vec![
+            Span::styled(format!("{:.1}%", swap_ratio * 100.0), Style::default().fg(theme.success_fg).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({:.1}G/{:.1}G)", swap_used_gb, swap_total_gb), Style::default().fg(theme.text_fg).add_modifier(Modifier::DIM)),
+        ]);
+        let swap_stats_para = Paragraph::new(swap_stats).alignment(ratatui::layout::Alignment::Right);
+
+        let swap_gauge = LineGauge::default()
+            .gauge_style(Style::default().fg(theme.accent_fg).bg(theme.border_fg))
+            .line_set(ratatui::symbols::line::THICK)
+            .ratio(swap_ratio.clamp(0.0, 1.0))
+            .label("");
+
+        f.render_widget(swap_label, row_chunks[0]);
+        f.render_widget(swap_gauge, row_chunks[1]);
+        f.render_widget(swap_stats_para, row_chunks[2]);
+    }
+
     let help_block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" ⌨ Quick Help ", Style::default().fg(Color::Rgb(80, 180, 255))));
+        .border_style(Style::default().fg(theme.border_fg))
+        .title(Span::styled(" ⌨ Quick Help ", Style::default().fg(theme.accent_fg)));
 
     let help_text = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Tab / [/] ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  Tab / [/] ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Switch tabs  "),
-            Span::styled("? ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("? ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
             Span::raw("All Keybindings"),
         ]),
         Line::from(vec![
-            Span::styled("  j/k / ↑/↓ ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  j/k / ↑/↓ ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Navigate  "),
-            Span::styled("Enter ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("Enter ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Install/Details"),
         ]),
         Line::from(vec![
-            Span::styled("  u / U     ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  u / U     ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Upgrade selected / Full upgrade"),
         ]),
         Line::from(vec![
-            Span::styled("  /         ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  /         ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Search  "),
-            Span::styled("t ", Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("t ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Toggle AUR/Flatpak"),
         ]),
         Line::from(vec![
-            Span::styled("  K         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  K         ", Style::default().fg(theme.error_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Fix Keyring errors"),
         ]),
         Line::from(vec![
-            Span::styled("  L         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  L         ", Style::default().fg(theme.error_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Unlock pacman database"),
         ]),
         Line::from(vec![
-            Span::styled("  M         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  M         ", Style::default().fg(theme.error_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Update mirrors (Reflector)"),
         ]),
         Line::from(vec![
-            Span::styled("  B         ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  B         ", Style::default().fg(theme.error_fg).add_modifier(Modifier::BOLD)),
             Span::raw("Install backup LTS kernel"),
         ]),
     ];
 
     let help_para = Paragraph::new(help_text).block(help_block);
-    f.render_widget(help_para, right_chunks[1]);
+    f.render_widget(help_para, right_chunks[2]);
 }
 
 fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
@@ -308,14 +477,14 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
         let paragraph = Paragraph::new(vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled("  ✅ ", Style::default().fg(Color::Rgb(100, 220, 100))),
+                Span::styled("  ✅ ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))),
                 Span::raw("No updates available — system is up to date!"),
             ]),
         ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" Updates ", Style::default().fg(Color::Rgb(100, 220, 100)))),
+                .title(Span::styled(" Updates ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))))),
         );
         f.render_widget(paragraph, area);
         return;
@@ -327,31 +496,31 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|u| {
             let is_selected = app.selected_packages.contains(&u.name);
             let select_marker = if is_selected {
-                Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
+                Span::styled(" [x] ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
+                Span::styled(" [ ] ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160))))
             };
 
             let is_repo = u.repository == "repo";
             let repo_tag = if is_repo {
-                Span::styled(" [repo] ", Style::default().fg(Color::Rgb(80, 180, 255)))
+                Span::styled(" [repo] ", Style::default().fg(tc(app, Color::Rgb(80, 180, 255))))
             } else {
-                Span::styled(" [aur]  ", Style::default().fg(Color::Rgb(255, 200, 80)))
+                Span::styled(" [aur]  ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))))
             };
 
             let name_style = if is_repo {
-                Style::default().fg(Color::Rgb(100, 220, 255)).add_modifier(Modifier::BOLD)
+                Style::default().fg(tc(app, Color::Rgb(100, 220, 255))).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)
+                Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)
             };
 
             let content = vec![Line::from(vec![
                 select_marker,
                 repo_tag,
                 Span::styled(format!("{:<25}", u.name), name_style),
-                Span::styled(&u.old_version, Style::default().fg(Color::Rgb(180, 80, 80))),
-                Span::styled(" → ", Style::default().fg(Color::Rgb(140, 140, 160))),
-                Span::styled(&u.new_version, Style::default().fg(Color::Rgb(100, 220, 100))),
+                Span::styled(&u.old_version, Style::default().fg(tc(app, Color::Rgb(180, 80, 80)))),
+                Span::styled(" → ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
+                Span::styled(&u.new_version, Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))),
             ])];
             ListItem::new(content)
         })
@@ -367,11 +536,11 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(Color::Rgb(255, 160, 80)))),
+                .title(Span::styled(title, Style::default().fg(tc(app, Color::Rgb(255, 160, 80))))),
         )
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(40, 45, 60))
+                .bg(tc(app, Color::Rgb(40, 45, 60)))
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");
@@ -379,21 +548,21 @@ fn draw_updates(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-fn draw_flatpak_missing_warning(f: &mut Frame, area: Rect) {
+fn draw_flatpak_missing_warning(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(255, 100, 100)))
-        .title(Span::styled(" ⚠ Flatpak Not Installed ", Style::default().fg(Color::Rgb(255, 80, 80)).add_modifier(Modifier::BOLD)));
+        .border_style(Style::default().fg(tc(app, Color::Rgb(255, 100, 100))))
+        .title(Span::styled(" ⚠ Flatpak Not Installed ", Style::default().fg(tc(app, Color::Rgb(255, 80, 80))).add_modifier(Modifier::BOLD)));
     
     let text = vec![
         Line::from(""),
-        Line::from(Span::styled("Flatpak is not installed on this system.", Style::default().fg(Color::Rgb(255, 120, 120)).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Flatpak is not installed on this system.", Style::default().fg(tc(app, Color::Rgb(255, 120, 120))).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from("To manage Flatpak and Flathub applications, you must install the utility first."),
         Line::from(""),
         Line::from(vec![
             Span::raw("Press "),
-            Span::styled(" [F] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [F] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw(" to install flatpak via paru."),
         ]),
         Line::from(""),
@@ -409,7 +578,7 @@ fn draw_flatpak_missing_warning(f: &mut Frame, area: Rect) {
 fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
     // Check if flatpak source is selected but flatpak is not available
     if app.installed_source == InstalledSource::Flatpak && !app.flatpak_available {
-        draw_flatpak_missing_warning(f, area);
+        draw_flatpak_missing_warning(f, app, area);
         return;
     }
 
@@ -433,21 +602,21 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(Span::styled(" Installed Packages (System) ", Style::default().fg(Color::Rgb(100, 160, 255)))),
+                            .title(Span::styled(" Installed Packages (System) ", Style::default().fg(tc(app, Color::Rgb(100, 160, 255))))),
                     )
-                    .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+                    .style(Style::default().fg(tc(app, Color::Rgb(140, 140, 160))));
                 f.render_widget(paragraph, chunks[0]);
                 
                 // Draw source footer helper
-                let helper = Paragraph::new(Span::styled(" [t] Switch to Flatpak Mode ", Style::default().fg(Color::Rgb(120, 120, 140))));
+                let helper = Paragraph::new(Span::styled(" [t] Switch to Flatpak Mode ", Style::default().fg(tc(app, Color::Rgb(120, 120, 140)))));
                 f.render_widget(helper, chunks[1]);
                 return;
             }
 
             let list_items: Vec<ListItem> = app.installed_packages.iter().map(|p| {
                 ListItem::new(vec![Line::from(vec![
-                    Span::styled(format!("{:<30}", p.name), Style::default().fg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD)),
-                    Span::styled(&p.version, Style::default().fg(Color::Rgb(180, 180, 200))),
+                    Span::styled(format!("{:<30}", p.name), Style::default().fg(tc(app, Color::Rgb(100, 180, 255))).add_modifier(Modifier::BOLD)),
+                    Span::styled(&p.version, Style::default().fg(tc(app, Color::Rgb(180, 180, 200)))),
                 ])])
             }).collect();
             
@@ -464,12 +633,12 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(Span::styled(" Installed Applications (Flatpak) ", Style::default().fg(Color::Rgb(0, 180, 180)))),
+                            .title(Span::styled(" Installed Applications (Flatpak) ", Style::default().fg(tc(app, Color::Rgb(0, 180, 180))))),
                     )
-                    .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+                    .style(Style::default().fg(tc(app, Color::Rgb(140, 140, 160))));
                 f.render_widget(paragraph, chunks[0]);
 
-                let helper = Paragraph::new(Span::styled(" [t] Switch to System Packages Mode ", Style::default().fg(Color::Rgb(120, 120, 140))));
+                let helper = Paragraph::new(Span::styled(" [t] Switch to System Packages Mode ", Style::default().fg(tc(app, Color::Rgb(120, 120, 140)))));
                 f.render_widget(helper, chunks[1]);
                 return;
             }
@@ -477,14 +646,14 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
             let list_items: Vec<ListItem> = app.installed_flatpaks.iter().map(|a| {
                 ListItem::new(vec![
                     Line::from(vec![
-                        Span::styled(format!("{:<30}", a.name), Style::default().fg(Color::Rgb(0, 200, 180)).add_modifier(Modifier::BOLD)),
-                        Span::styled(format!(" v{}", a.version), Style::default().fg(Color::Rgb(180, 180, 200))),
+                        Span::styled(format!("{:<30}", a.name), Style::default().fg(tc(app, Color::Rgb(0, 200, 180))).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" v{}", a.version), Style::default().fg(tc(app, Color::Rgb(180, 180, 200)))),
                     ]),
                     Line::from(vec![
                         Span::raw("     "),
-                        Span::styled(&a.app_id, Style::default().fg(Color::Rgb(120, 120, 140))),
+                        Span::styled(&a.app_id, Style::default().fg(tc(app, Color::Rgb(120, 120, 140)))),
                         Span::raw("  "),
-                        Span::styled(format!("(branch: {})", a.branch), Style::default().fg(Color::Rgb(100, 100, 120))),
+                        Span::styled(format!("(branch: {})", a.branch), Style::default().fg(tc(app, Color::Rgb(100, 100, 120)))),
                     ]),
                 ])
             }).collect();
@@ -494,8 +663,8 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let title_color = match app.installed_source {
-        InstalledSource::System => Color::Rgb(100, 160, 255),
-        InstalledSource::Flatpak => Color::Rgb(0, 180, 180),
+        InstalledSource::System => tc(app, Color::Rgb(100, 160, 255)),
+        InstalledSource::Flatpak => tc(app, Color::Rgb(0, 180, 180)),
     };
 
     let list = List::new(items)
@@ -506,7 +675,7 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(40, 45, 60))
+                .bg(tc(app, Color::Rgb(40, 45, 60)))
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");
@@ -519,7 +688,7 @@ fn draw_installed(f: &mut Frame, app: &mut App, area: Rect) {
         InstalledSource::Flatpak => "Flatpak",
     };
     let helper_text = Line::from(vec![
-        Span::styled(" [t] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+        Span::styled(" [t] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
         Span::raw(format!("Source: {} (Press t to toggle)", source_label)),
     ]);
     let helper = Paragraph::new(helper_text);
@@ -537,8 +706,8 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     let input_style = match app.input_mode {
-        InputMode::Normal => Style::default().fg(Color::Rgb(140, 140, 160)),
-        InputMode::Editing => Style::default().fg(Color::Rgb(255, 220, 80)),
+        InputMode::Normal => Style::default().fg(tc(app, Color::Rgb(140, 140, 160))),
+        InputMode::Editing => Style::default().fg(tc(app, Color::Rgb(255, 220, 80))),
     };
 
     let source_title = match app.search_source {
@@ -552,7 +721,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
             .borders(Borders::ALL)
             .title(Span::styled(
                 format!(" 🔍 {} (/ to edit, Enter to search, Esc to cancel) ", source_title),
-                Style::default().fg(Color::Rgb(200, 180, 255)),
+                Style::default().fg(tc(app, Color::Rgb(200, 180, 255))),
             )),
     );
     f.render_widget(input, chunks[0]);
@@ -567,7 +736,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Check if flatpak source is selected but flatpak is not available
     if app.search_source == SearchSource::Flatpak && !app.flatpak_available {
-        draw_flatpak_missing_warning(f, chunks[1]);
+        draw_flatpak_missing_warning(f, app, chunks[1]);
         return;
     }
 
@@ -586,9 +755,9 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(Span::styled(" Results ", Style::default().fg(Color::Rgb(140, 140, 160)))),
+                    .title(Span::styled(" Results ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160))))),
             )
-            .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+            .style(Style::default().fg(tc(app, Color::Rgb(140, 140, 160))));
         f.render_widget(paragraph, chunks[1]);
     } else {
         let (items, title_text, title_color) = match app.search_source {
@@ -596,23 +765,23 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
                 let list_items: Vec<ListItem> = app.search_results.iter().map(|p| {
                     let is_selected = app.selected_packages.contains(&p.name);
                     let select_marker = if is_selected {
-                        Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
+                        Span::styled(" [x] ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))).add_modifier(Modifier::BOLD))
                     } else {
-                        Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
+                        Span::styled(" [ ] ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160))))
                     };
 
                     let mut lines = vec![Line::from(vec![
                         select_marker,
-                        Span::styled(format!("{:<25}", p.name), Style::default().fg(Color::Rgb(200, 130, 255)).add_modifier(Modifier::BOLD)),
-                        Span::styled(format!("v{}", p.version), Style::default().fg(Color::Rgb(180, 180, 200))),
+                        Span::styled(format!("{:<25}", p.name), Style::default().fg(tc(app, Color::Rgb(200, 130, 255))).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("v{}", p.version), Style::default().fg(tc(app, Color::Rgb(180, 180, 200)))),
                         Span::raw("  "),
-                        Span::styled(format!("⬆{}", p.votes), Style::default().fg(Color::Rgb(100, 220, 100))),
+                        Span::styled(format!("⬆{}", p.votes), Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))),
                         Span::raw("  "),
-                        Span::styled(format!("★{:.2}", p.popularity), Style::default().fg(Color::Rgb(255, 200, 80))),
+                        Span::styled(format!("★{:.2}", p.popularity), Style::default().fg(tc(app, Color::Rgb(255, 200, 80)))),
                     ])];
                     if let Some(ref desc) = p.description {
                         lines.push(Line::from(vec![
-                            Span::styled(format!("       {}", desc.chars().take(80).collect::<String>()), Style::default().fg(Color::Rgb(140, 140, 160))),
+                            Span::styled(format!("       {}", desc.chars().take(80).collect::<String>()), Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
                         ]));
                     }
                     ListItem::new(lines)
@@ -625,26 +794,26 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
                     format!(" AUR/Pacman Results ({}) — [Space] Select  [Enter] Install Selected  [s] Scan ", app.search_results.len())
                 };
 
-                (list_items, title, Color::Rgb(200, 130, 255))
+                (list_items, title, tc(app, Color::Rgb(200, 130, 255)))
             }
             SearchSource::Flatpak => {
                 let list_items: Vec<ListItem> = app.flatpak_search_results.iter().map(|a| {
                     let mut lines = vec![
                         Line::from(vec![
-                            Span::styled(format!("{:<25}", a.name), Style::default().fg(Color::Rgb(0, 200, 180)).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("{:<25}", a.name), Style::default().fg(tc(app, Color::Rgb(0, 200, 180))).add_modifier(Modifier::BOLD)),
                             Span::raw("  "),
-                            Span::styled(&a.app_id, Style::default().fg(Color::Rgb(120, 120, 140))),
+                            Span::styled(&a.app_id, Style::default().fg(tc(app, Color::Rgb(120, 120, 140)))),
                         ])
                     ];
                     if let Some(ref summary) = a.summary {
                         lines.push(Line::from(vec![
-                            Span::styled(format!("       {}", summary.chars().take(80).collect::<String>()), Style::default().fg(Color::Rgb(140, 140, 160))),
+                            Span::styled(format!("       {}", summary.chars().take(80).collect::<String>()), Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
                         ]));
                     }
                     ListItem::new(lines)
                 }).collect();
 
-                (list_items, format!(" Flathub Results ({}) — [Enter] Install App ", app.flatpak_search_results.len()), Color::Rgb(0, 180, 180))
+                (list_items, format!(" Flathub Results ({}) — [Enter] Install App ", app.flatpak_search_results.len()), tc(app, Color::Rgb(0, 180, 180)))
             }
         };
 
@@ -656,7 +825,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::Rgb(40, 45, 60))
+                    .bg(tc(app, Color::Rgb(40, 45, 60)))
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▸ ");
@@ -670,7 +839,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         SearchSource::Flatpak => "Flathub (Flatpak)",
     };
     let helper_text = Line::from(vec![
-        Span::styled(" [t] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+        Span::styled(" [t] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
         Span::raw(format!("Search Source: {} (Press t to toggle)", source_label)),
     ]);
     let helper = Paragraph::new(helper_text);
@@ -688,9 +857,9 @@ fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(Span::styled(" 📰 Arch Linux News ", Style::default().fg(Color::Rgb(200, 180, 255)))),
+                    .title(Span::styled(" 📰 Arch Linux News ", Style::default().fg(tc(app, Color::Rgb(200, 180, 255))))),
             )
-            .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+            .style(Style::default().fg(tc(app, Color::Rgb(140, 140, 160))));
         f.render_widget(paragraph, area);
         return;
     }
@@ -708,12 +877,12 @@ fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {
             let content = vec![Line::from(vec![
                 Span::styled(
                     format!("{:<12}", n.pub_date.chars().take(16).collect::<String>()),
-                    Style::default().fg(Color::Rgb(140, 140, 160)),
+                    Style::default().fg(tc(app, Color::Rgb(140, 140, 160))),
                 ),
                 Span::styled(
                     &n.title,
                     Style::default()
-                        .fg(Color::Rgb(200, 200, 240))
+                        .fg(tc(app, Color::Rgb(200, 200, 240)))
                         .add_modifier(Modifier::BOLD),
                 ),
             ])];
@@ -727,12 +896,12 @@ fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {
                 .borders(Borders::ALL)
                 .title(Span::styled(
                     " 📰 Arch Linux News ",
-                    Style::default().fg(Color::Rgb(200, 180, 255)),
+                    Style::default().fg(tc(app, Color::Rgb(200, 180, 255))),
                 )),
         )
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(40, 45, 60))
+                .bg(tc(app, Color::Rgb(40, 45, 60)))
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");
@@ -744,16 +913,16 @@ fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {
         if let Some(news) = app.news_items.get(idx) {
             vec![
                 Line::from(vec![
-                    Span::styled(&news.title, Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)),
+                    Span::styled(&news.title, Style::default().fg(tc(app, Color::Rgb(255, 220, 80))).add_modifier(Modifier::BOLD)),
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("Date: ", Style::default().fg(Color::Rgb(140, 140, 160))),
+                    Span::styled("Date: ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
                     Span::raw(&news.pub_date),
                 ]),
                 Line::from(vec![
-                    Span::styled("Link: ", Style::default().fg(Color::Rgb(140, 140, 160))),
-                    Span::styled(&news.link, Style::default().fg(Color::Rgb(100, 160, 255))),
+                    Span::styled("Link: ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
+                    Span::styled(&news.link, Style::default().fg(tc(app, Color::Rgb(100, 160, 255)))),
                 ]),
                 Line::from(""),
                 Line::from(Span::raw(&news.description)),
@@ -769,7 +938,7 @@ fn draw_news(f: &mut Frame, app: &mut App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" Details ", Style::default().fg(Color::Rgb(140, 140, 160)))),
+                .title(Span::styled(" Details ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160))))),
         )
         .wrap(Wrap { trim: true });
 
@@ -812,41 +981,41 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
 
     let disk_text = vec![
         Line::from(vec![
-            Span::styled("  Root Partition: ", Style::default().fg(Color::Rgb(140, 140, 160))),
-            Span::styled(format!("{} free / {} total ", free_str, total_str), Style::default().fg(Color::Rgb(255, 255, 255))),
-            Span::styled(bar, Style::default().fg(if used_percent > 85 { Color::Rgb(255, 100, 100) } else { Color::Rgb(80, 180, 255) })),
+            Span::styled("  Root Partition: ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
+            Span::styled(format!("{} free / {} total ", free_str, total_str), Style::default().fg(tc(app, Color::Rgb(255, 255, 255)))),
+            Span::styled(bar, Style::default().fg(if used_percent > 85 { tc(app, Color::Rgb(255, 100, 100)) } else { tc(app, Color::Rgb(80, 180, 255)) })),
         ]),
         Line::from(vec![
-            Span::styled("  Pacman Cache:   ", Style::default().fg(Color::Rgb(140, 140, 160))),
-            Span::styled(format_size(app.disk_stats.pacman_cache_bytes), Style::default().fg(Color::Rgb(255, 200, 100)).add_modifier(Modifier::BOLD)),
-            Span::styled("   Paru Cache: ", Style::default().fg(Color::Rgb(140, 140, 160))),
-            Span::styled(format_size(app.disk_stats.paru_cache_bytes), Style::default().fg(Color::Rgb(255, 200, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  Pacman Cache:   ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
+            Span::styled(format_size(app.disk_stats.pacman_cache_bytes), Style::default().fg(tc(app, Color::Rgb(255, 200, 100))).add_modifier(Modifier::BOLD)),
+            Span::styled("   Paru Cache: ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
+            Span::styled(format_size(app.disk_stats.paru_cache_bytes), Style::default().fg(tc(app, Color::Rgb(255, 200, 100))).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Cleaners: ", Style::default().fg(Color::Rgb(140, 140, 160))),
-            Span::styled(" [c] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  Cleaners: ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
+            Span::styled(" [c] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("paccache -r  "),
-            Span::styled(" [C] ", Style::default().fg(Color::Rgb(255, 150, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [C] ", Style::default().fg(tc(app, Color::Rgb(255, 150, 50))).add_modifier(Modifier::BOLD)),
             Span::raw("pacman -Sc  "),
-            Span::styled(" [f] ", Style::default().fg(Color::Rgb(200, 100, 255)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [f] ", Style::default().fg(tc(app, Color::Rgb(200, 100, 255))).add_modifier(Modifier::BOLD)),
             Span::raw("flatpak unused"),
         ]),
     ];
 
     let disk_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
-        .title(Span::styled(" 💾 System Disk Usage ", Style::default().fg(Color::Rgb(80, 180, 255))));
+        .border_style(Style::default().fg(tc(app, Color::Rgb(60, 60, 80))))
+        .title(Span::styled(" 💾 System Disk Usage ", Style::default().fg(tc(app, Color::Rgb(80, 180, 255)))));
 
     let disk_para = Paragraph::new(disk_text).block(disk_block);
     f.render_widget(disk_para, left_chunks[0]);
 
     // Left Pane (lower): Cache Manager
     let cache_border_style = if app.cache_active_pane == 0 {
-        Style::default().fg(Color::Rgb(255, 200, 80))
+        Style::default().fg(tc(app, Color::Rgb(255, 200, 80)))
     } else {
-        Style::default().fg(Color::Rgb(60, 60, 80))
+        Style::default().fg(tc(app, Color::Rgb(60, 60, 80)))
     };
 
     if app.cache_entries.is_empty() {
@@ -860,9 +1029,9 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(cache_border_style)
-                    .title(Span::styled(" 🧹 Cache Manager ", Style::default().fg(Color::Rgb(255, 200, 100)))),
+                    .title(Span::styled(" 🧹 Cache Manager ", Style::default().fg(tc(app, Color::Rgb(255, 200, 100))))),
             )
-            .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+            .style(Style::default().fg(tc(app, Color::Rgb(140, 140, 160))));
         f.render_widget(paragraph, left_chunks[1]);
     } else {
         let total_size: u64 = app.cache_entries.iter().map(|c| c.size_bytes).sum();
@@ -874,12 +1043,12 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(
                         format!("{:<25}", c.name),
                         Style::default()
-                            .fg(Color::Rgb(255, 200, 100))
+                            .fg(tc(app, Color::Rgb(255, 200, 100)))
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!("{:>10}", format_size(c.size_bytes)),
-                        Style::default().fg(Color::Rgb(180, 180, 200)),
+                        Style::default().fg(tc(app, Color::Rgb(180, 180, 200))),
                     ),
                 ])];
                 ListItem::new(content)
@@ -896,11 +1065,11 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(cache_border_style)
-                    .title(Span::styled(title, Style::default().fg(Color::Rgb(255, 200, 100)))),
+                    .title(Span::styled(title, Style::default().fg(tc(app, Color::Rgb(255, 200, 100))))),
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::Rgb(40, 45, 60))
+                    .bg(tc(app, Color::Rgb(40, 45, 60)))
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▸ ");
@@ -914,9 +1083,9 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Right pane: Orphans cleaner
     let orphans_border_style = if app.cache_active_pane == 1 {
-        Style::default().fg(Color::Rgb(255, 200, 80))
+        Style::default().fg(tc(app, Color::Rgb(255, 200, 80)))
     } else {
-        Style::default().fg(Color::Rgb(60, 60, 80))
+        Style::default().fg(tc(app, Color::Rgb(60, 60, 80)))
     };
 
     let orphan_chunks = Layout::default()
@@ -935,9 +1104,9 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(orphans_border_style)
-                    .title(Span::styled(" 🍂 Orphan Dependencies ", Style::default().fg(Color::Rgb(255, 100, 100)))),
+                    .title(Span::styled(" 🍂 Orphan Dependencies ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))))),
             )
-            .style(Style::default().fg(Color::Rgb(140, 140, 160)));
+            .style(Style::default().fg(tc(app, Color::Rgb(140, 140, 160))));
         f.render_widget(paragraph, orphan_chunks[0]);
     } else {
         let items: Vec<ListItem> = app
@@ -948,16 +1117,16 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(
                         format!("{:<25}", pkg.name),
                         Style::default()
-                            .fg(Color::Rgb(255, 100, 100))
+                            .fg(tc(app, Color::Rgb(255, 100, 100)))
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!("{:<15}", pkg.version),
-                        Style::default().fg(Color::Rgb(140, 140, 160)),
+                        Style::default().fg(tc(app, Color::Rgb(140, 140, 160))),
                     ),
                     Span::styled(
                         pkg.size.as_deref().unwrap_or(""),
-                        Style::default().fg(Color::Rgb(255, 200, 100)),
+                        Style::default().fg(tc(app, Color::Rgb(255, 200, 100))),
                     ),
                 ])];
                 ListItem::new(content)
@@ -970,11 +1139,11 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(orphans_border_style)
-                    .title(Span::styled(title, Style::default().fg(Color::Rgb(255, 100, 100)))),
+                    .title(Span::styled(title, Style::default().fg(tc(app, Color::Rgb(255, 100, 100))))),
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::Rgb(55, 40, 40))
+                    .bg(tc(app, Color::Rgb(55, 40, 40)))
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▸ ");
@@ -988,32 +1157,32 @@ fn draw_cache(f: &mut Frame, app: &mut App, area: Rect) {
     // Help/actions bar for cache / orphans
     let help_text = if app.cache_active_pane == 0 {
         vec![
-            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Navigate Cache  "),
-            Span::styled(" [d] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [d] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Delete Selected  "),
-            Span::styled(" [D] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [D] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Clean All Cache  "),
-            Span::styled(" [l/→] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [l/→] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Switch to Orphans"),
         ]
     } else {
         vec![
-            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Navigate Orphans  "),
-            Span::styled(" [d] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [d] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Remove Selected  "),
-            Span::styled(" [D] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [D] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Remove All Orphans  "),
-            Span::styled(" [h/←] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [h/←] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Switch to Cache"),
         ]
     };
 
     let help_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
-        .title(Span::styled(" Actions ", Style::default().fg(Color::Rgb(140, 140, 160))));
+        .border_style(Style::default().fg(tc(app, Color::Rgb(60, 60, 80))))
+        .title(Span::styled(" Actions ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))));
     let help_para = Paragraph::new(Line::from(help_text)).block(help_block);
     f.render_widget(help_para, orphan_chunks[1]);
 }
@@ -1029,17 +1198,17 @@ fn draw_scanner(f: &mut Frame, app: &mut App, area: Rect) {
             .split(area);
 
         let risk_color = if result.score > 60 {
-            Color::Rgb(255, 80, 80)
+            tc(app, Color::Rgb(255, 80, 80))
         } else if result.score > 30 {
-            Color::Rgb(255, 200, 80)
+            tc(app, Color::Rgb(255, 200, 80))
         } else {
-            Color::Rgb(100, 220, 100)
+            tc(app, Color::Rgb(100, 220, 100))
         };
 
         let header_text = vec![
             Line::from(vec![
                 Span::raw("  Package: "),
-                Span::styled(&result.package_name, Style::default().fg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD)),
+                Span::styled(&result.package_name, Style::default().fg(tc(app, Color::Rgb(100, 180, 255))).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
                 Span::raw("  Risk Score: "),
@@ -1062,14 +1231,14 @@ fn draw_scanner(f: &mut Frame, app: &mut App, area: Rect) {
             let safe_msg = Paragraph::new(vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("  ✅ ", Style::default().fg(Color::Rgb(100, 220, 100))),
+                    Span::styled("  ✅ ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))),
                     Span::raw("No obvious threats detected."),
                 ]),
             ])
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(Span::styled(" Details ", Style::default().fg(Color::Rgb(100, 220, 100)))),
+                    .title(Span::styled(" Details ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))))),
             );
             f.render_widget(safe_msg, chunks[1]);
         } else {
@@ -1091,7 +1260,7 @@ fn draw_scanner(f: &mut Frame, app: &mut App, area: Rect) {
                                 v.line_number.unwrap_or(0),
                                 v.line_content.clone().unwrap_or_default().trim()
                             ),
-                            Style::default().fg(Color::Rgb(180, 180, 200)),
+                            Style::default().fg(tc(app, Color::Rgb(180, 180, 200))),
                         )]),
                     ];
                     ListItem::new(content)
@@ -1101,7 +1270,7 @@ fn draw_scanner(f: &mut Frame, app: &mut App, area: Rect) {
             let list = List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(Span::styled(" ⚠ Detected Issues ", Style::default().fg(Color::Rgb(255, 160, 80)))),
+                    .title(Span::styled(" ⚠ Detected Issues ", Style::default().fg(tc(app, Color::Rgb(255, 160, 80))))),
             );
             f.render_widget(list, chunks[1]);
         }
@@ -1114,7 +1283,7 @@ fn draw_scanner(f: &mut Frame, app: &mut App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" 🛡 Security Scanner ", Style::default().fg(Color::Rgb(140, 140, 160)))),
+                .title(Span::styled(" 🛡 Security Scanner ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160))))),
         );
         f.render_widget(paragraph, area);
     }
@@ -1127,6 +1296,7 @@ fn draw_placeholder(f: &mut Frame, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme();
     let status = if app.is_loading {
         format!(
             "{} {}",
@@ -1146,6 +1316,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         Route::News => "News",
         Route::Cache => "Cache",
         Route::Scanner => "Scanner",
+        Route::Settings => "Settings",
         _ => "Unknown",
     };
 
@@ -1158,20 +1329,20 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(
             format!(" {} ", route_name),
             Style::default()
-                .fg(Color::Rgb(30, 30, 40))
-                .bg(Color::Rgb(80, 180, 255))
+                .fg(theme.highlight_fg)
+                .bg(theme.highlight_bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(status, Style::default().fg(Color::Rgb(160, 180, 220))),
+        Span::styled(status, Style::default().fg(theme.text_fg)),
         Span::raw(padding),
-        Span::styled(team, Style::default().fg(Color::Rgb(100, 110, 130))),
+        Span::styled(team, Style::default().fg(theme.border_fg)),
     ]);
 
     let paragraph = Paragraph::new(footer_line).block(
         Block::default()
             .borders(Borders::ALL)
-            .style(Style::default()),
+            .border_style(Style::default().fg(theme.border_fg)),
     );
     f.render_widget(paragraph, area);
 }
@@ -1192,13 +1363,13 @@ fn draw_confirm_dialog(f: &mut Frame, app: &mut App) {
             Line::from(""),
             Line::from(Span::styled(
                 msg.as_str(),
-                Style::default().fg(Color::Rgb(255, 220, 80)),
+                Style::default().fg(tc(app, Color::Rgb(255, 220, 80))),
             )),
             Line::from(""),
             Line::from(vec![
-                Span::styled("  [y] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD)),
+                Span::styled("  [y] ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))).add_modifier(Modifier::BOLD)),
                 Span::raw("Yes   "),
-                Span::styled("[n] ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+                Span::styled("[n] ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
                 Span::raw("No"),
             ]),
         ];
@@ -1210,27 +1381,40 @@ fn draw_confirm_dialog(f: &mut Frame, app: &mut App) {
                     .title(Span::styled(
                         " ⚠ Confirm ",
                         Style::default()
-                            .fg(Color::Rgb(255, 200, 80))
+                            .fg(tc(app, Color::Rgb(255, 200, 80)))
                             .add_modifier(Modifier::BOLD),
                     ))
-                    .style(Style::default().bg(Color::Rgb(30, 30, 45))),
+                    .style(Style::default().bg(tc(app, Color::Rgb(30, 30, 45)))),
             )
-            .style(Style::default().bg(Color::Rgb(30, 30, 45)));
+            .style(Style::default().bg(tc(app, Color::Rgb(30, 30, 45))));
 
         f.render_widget(dialog, dialog_area);
     }
 }
 
 fn draw_pkgbuild_viewer(f: &mut Frame, app: &mut App, area: Rect) {
+    let mode_str = match app.pkgbuild_view_mode {
+        crate::app::PkgbuildViewMode::Full => "Full",
+        crate::app::PkgbuildViewMode::Diff => "Diff",
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            " 📝 PKGBUILD Viewer ([j/↓] Down  [k/↑] Up  [Esc] Return) ",
-            Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD),
+            format!(
+                " 📝 PKGBUILD Viewer: {} ({}) ([d] Toggle Mode  [j/↓] Down  [k/↑] Up  [Esc] Return) ",
+                app.pkgbuild_name, mode_str
+            ),
+            Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default());
 
-    let lines: Vec<Line<'_>> = app.pkgbuild_lines.iter().map(|line| {
+    let active_lines = match app.pkgbuild_view_mode {
+        crate::app::PkgbuildViewMode::Full => &app.pkgbuild_raw_lines,
+        crate::app::PkgbuildViewMode::Diff => &app.pkgbuild_diff_lines,
+    };
+
+    let lines: Vec<Line<'_>> = active_lines.iter().map(|line| {
         let spans: Vec<Span<'_>> = line.iter().map(|span| {
             Span::styled(&*span.content, span.style)
         }).collect();
@@ -1254,9 +1438,9 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Left pane: Categories
     let category_border_style = if app.store_active_pane == 0 {
-        Style::default().fg(Color::Rgb(255, 200, 80))
+        Style::default().fg(tc(app, Color::Rgb(255, 200, 80)))
     } else {
-        Style::default().fg(Color::Rgb(60, 60, 80))
+        Style::default().fg(tc(app, Color::Rgb(60, 60, 80)))
     };
 
     let category_items: Vec<ListItem> = categories
@@ -1265,10 +1449,10 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(i, cat)| {
             let style = if i == app.store_category_index {
                 Style::default()
-                    .fg(Color::Rgb(255, 200, 80))
+                    .fg(tc(app, Color::Rgb(255, 200, 80)))
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(180, 180, 200))
+                Style::default().fg(tc(app, Color::Rgb(180, 180, 200)))
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("  {} ", if i == app.store_category_index { "→" } else { " " }), style),
@@ -1282,12 +1466,12 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(category_border_style)
         .title(Span::styled(
             " 📂 Categories ",
-            Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD),
+            Style::default().fg(tc(app, Color::Rgb(80, 180, 255))).add_modifier(Modifier::BOLD),
         ));
 
     let category_list = List::new(category_items)
         .block(category_block)
-        .highlight_style(Style::default().bg(Color::Rgb(40, 40, 55)));
+        .highlight_style(Style::default().bg(tc(app, Color::Rgb(40, 40, 55))));
 
     let mut category_list_state = ListState::default();
     category_list_state.select(Some(app.store_category_index));
@@ -1295,9 +1479,9 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Right pane: Apps in current category
     let app_border_style = if app.store_active_pane == 1 {
-        Style::default().fg(Color::Rgb(255, 200, 80))
+        Style::default().fg(tc(app, Color::Rgb(255, 200, 80)))
     } else {
-        Style::default().fg(Color::Rgb(60, 60, 80))
+        Style::default().fg(tc(app, Color::Rgb(60, 60, 80)))
     };
 
     let current_cat = categories[app.store_category_index];
@@ -1309,22 +1493,22 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(i, store_app)| {
             let is_selected = app.selected_packages.contains(store_app.name);
             let select_marker = if is_selected {
-                Span::styled(" [x] ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD))
+                Span::styled(" [x] ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [ ] ", Style::default().fg(Color::Rgb(140, 140, 160)))
+                Span::styled(" [ ] ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160))))
             };
 
             let is_installed = app.installed_packages_set.contains(store_app.name);
             let status_span = if is_installed {
-                Span::styled(" (Installed)", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::ITALIC))
+                Span::styled(" (Installed)", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))).add_modifier(Modifier::ITALIC))
             } else {
                 Span::raw("")
             };
 
             let name_style = if i == app.store_app_index && app.store_active_pane == 1 {
-                Style::default().fg(Color::Rgb(255, 220, 80)).add_modifier(Modifier::BOLD)
+                Style::default().fg(tc(app, Color::Rgb(255, 220, 80))).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD)
+                Style::default().fg(tc(app, Color::Rgb(80, 180, 255))).add_modifier(Modifier::BOLD)
             };
 
             let content = vec![
@@ -1335,7 +1519,7 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::raw("     "),
-                    Span::styled(store_app.description, Style::default().fg(Color::Rgb(140, 140, 160))),
+                    Span::styled(store_app.description, Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))),
                 ]),
                 Line::from(""), // spacing
             ];
@@ -1349,7 +1533,7 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(app_border_style)
         .title(Span::styled(
             app_title,
-            Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD),
+            Style::default().fg(tc(app, Color::Rgb(80, 180, 255))).add_modifier(Modifier::BOLD),
         ));
 
     // Splitting the right pane into apps list and help/info bar
@@ -1360,7 +1544,7 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
 
     let app_list = List::new(app_items)
         .block(app_block)
-        .highlight_style(Style::default().bg(Color::Rgb(40, 40, 55)));
+        .highlight_style(Style::default().bg(tc(app, Color::Rgb(40, 40, 55))));
 
     let mut app_list_state = ListState::default();
     app_list_state.select(Some(app.store_app_index));
@@ -1369,35 +1553,35 @@ fn draw_store(f: &mut Frame, app: &mut App, area: Rect) {
     // Help/actions bar
     let help_text = if app.store_active_pane == 0 {
         vec![
-            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Navigate Categories  "),
-            Span::styled(" [l/→] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [l/→] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Go to Applications List"),
         ]
     } else {
         vec![
-            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Navigate Apps  "),
-            Span::styled(" [Space] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [Space] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Toggle Batch Selection  "),
-            Span::styled(" [v] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [v] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("View PKGBUILD  "),
-            Span::styled(" [Enter] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [Enter] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Install Selected  "),
-            Span::styled(" [h/←] ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [h/←] ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Back to Categories"),
         ]
     };
 
     let help_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
-        .title(Span::styled(" Actions ", Style::default().fg(Color::Rgb(140, 140, 160))));
+        .border_style(Style::default().fg(tc(app, Color::Rgb(60, 60, 80))))
+        .title(Span::styled(" Actions ", Style::default().fg(tc(app, Color::Rgb(140, 140, 160)))));
     let help_para = Paragraph::new(Line::from(help_text)).block(help_block);
     f.render_widget(help_para, right_chunks[1]);
 }
 
-fn draw_help_modal(f: &mut Frame, _app: &App) {
+fn draw_help_modal(f: &mut Frame, app: &App) {
     let area = f.size();
     // Center the dialog
     let dialog_width = 76u16.min(area.width.saturating_sub(4));
@@ -1408,13 +1592,13 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
 
     f.render_widget(Clear, dialog_area);
 
-    let border_style = Style::default().fg(Color::Rgb(80, 180, 255));
+    let border_style = Style::default().fg(tc(app, Color::Rgb(80, 180, 255)));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(
             " ⌨ Keyboard Shortcuts ",
-            Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD),
+            Style::default().fg(tc(app, Color::Rgb(80, 180, 255))).add_modifier(Modifier::BOLD),
         ));
 
     // Split inside the modal into two horizontal halves (columns)
@@ -1426,88 +1610,88 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
 
     // Left Column: Navigation & Global
     let left_text = vec![
-        Line::from(Span::styled("── Global & Navigation ────────────────", Style::default().fg(Color::Rgb(100, 100, 120)))),
+        Line::from(Span::styled("── Global & Navigation ────────────────", Style::default().fg(tc(app, Color::Rgb(100, 100, 120))))),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Tab / ]       ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  Tab / ]       ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Next Tab"),
         ]),
         Line::from(vec![
-            Span::styled("  Shift-Tab / [ ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  Shift-Tab / [ ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Prev Tab"),
         ]),
         Line::from(vec![
-            Span::styled("  1 - 8         ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  1 - 8         ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Switch to Tab 1-8"),
         ]),
         Line::from(vec![
-            Span::styled("  j / k / ↑ / ↓ ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  j / k / ↑ / ↓ ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Navigate List"),
         ]),
         Line::from(vec![
-            Span::styled("  h / l / ← / → ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  h / l / ← / → ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Switch Panes"),
         ]),
         Line::from(vec![
-            Span::styled("  Esc / q       ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  Esc / q       ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Quit / Close"),
         ]),
         Line::from(vec![
-            Span::styled("  ?             ", Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD)),
+            Span::styled("  ?             ", Style::default().fg(tc(app, Color::Rgb(80, 180, 255))).add_modifier(Modifier::BOLD)),
             Span::raw("Toggle Help Menu"),
         ]),
     ];
 
     // Right Column: Package Operations & Caches
     let right_text = vec![
-        Line::from(Span::styled("── Actions & Maintenance ─────────────", Style::default().fg(Color::Rgb(100, 100, 120)))),
+        Line::from(Span::styled("── Actions & Maintenance ─────────────", Style::default().fg(tc(app, Color::Rgb(100, 100, 120))))),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  i             ", Style::default().fg(Color::Rgb(100, 220, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  i             ", Style::default().fg(tc(app, Color::Rgb(100, 220, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Install selected package"),
         ]),
         Line::from(vec![
-            Span::styled("  d             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  d             ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Remove / Clean selected"),
         ]),
         Line::from(vec![
-            Span::styled("  D             ", Style::default().fg(Color::Rgb(200, 50, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled("  D             ", Style::default().fg(tc(app, Color::Rgb(200, 50, 50))).add_modifier(Modifier::BOLD)),
             Span::raw("Remove / Clean ALL"),
         ]),
         Line::from(vec![
-            Span::styled("  u / U         ", Style::default().fg(Color::Rgb(80, 180, 255)).add_modifier(Modifier::BOLD)),
+            Span::styled("  u / U         ", Style::default().fg(tc(app, Color::Rgb(80, 180, 255))).add_modifier(Modifier::BOLD)),
             Span::raw("Update Selected / All"),
         ]),
         Line::from(vec![
-            Span::styled("  c             ", Style::default().fg(Color::Rgb(255, 200, 80)).add_modifier(Modifier::BOLD)),
+            Span::styled("  c             ", Style::default().fg(tc(app, Color::Rgb(255, 200, 80))).add_modifier(Modifier::BOLD)),
             Span::raw("Paccache -r (keep 3 ver)"),
         ]),
         Line::from(vec![
-            Span::styled("  C             ", Style::default().fg(Color::Rgb(255, 150, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled("  C             ", Style::default().fg(tc(app, Color::Rgb(255, 150, 50))).add_modifier(Modifier::BOLD)),
             Span::raw("Pacman -Sc (clean unused)"),
         ]),
         Line::from(vec![
-            Span::styled("  f             ", Style::default().fg(Color::Rgb(200, 100, 255)).add_modifier(Modifier::BOLD)),
+            Span::styled("  f             ", Style::default().fg(tc(app, Color::Rgb(200, 100, 255))).add_modifier(Modifier::BOLD)),
             Span::raw("Clean unused Flatpaks"),
         ]),
         Line::from(vec![
-            Span::styled("  K             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  K             ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Fix Keyring errors"),
         ]),
         Line::from(vec![
-            Span::styled("  L             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  L             ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Unlock pacman database"),
         ]),
         Line::from(vec![
-            Span::styled("  R             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  R             ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Reset keys trust database"),
         ]),
         Line::from(vec![
-            Span::styled("  M             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  M             ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Update mirrorlist (Reflector)"),
         ]),
         Line::from(vec![
-            Span::styled("  B             ", Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)),
+            Span::styled("  B             ", Style::default().fg(tc(app, Color::Rgb(255, 100, 100))).add_modifier(Modifier::BOLD)),
             Span::raw("Install backup LTS kernel"),
         ]),
     ];
@@ -1519,3 +1703,303 @@ fn draw_help_modal(f: &mut Frame, _app: &App) {
     f.render_widget(left_para, columns[0]);
     f.render_widget(right_para, columns[1]);
 }
+
+fn draw_settings(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme();
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    // LEFT PANE: General Settings
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_fg))
+        .title(Span::styled(" ⚙️ General Settings ", Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD)));
+
+    let mut left_lines = Vec::new();
+    left_lines.push(Line::from(""));
+
+    // Theme selector
+    {
+        let is_selected = app.settings_selected_index == 0;
+        let label = Span::styled("  Theme:              ", Style::default().fg(theme.text_fg));
+        
+        let theme_options = ["Default", "Nord", "Gruvbox", "Dracula", "Cyberpunk"];
+        let mut spans = vec![label];
+        
+        for (idx, opt) in theme_options.iter().enumerate() {
+            let opt_style = if app.config.theme.eq_ignore_ascii_case(opt) {
+                Style::default().fg(theme.success_fg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_fg)
+            };
+            
+            let mut opt_str = format!(" {}", opt);
+            if idx < theme_options.len() - 1 {
+                opt_str.push_str(" |");
+            }
+            spans.push(Span::styled(opt_str, opt_style));
+        }
+
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        left_lines.push(Line::from(spans).style(row_style));
+    }
+    left_lines.push(Line::from(vec![
+        Span::styled("  Active Palette:     ", Style::default().fg(theme.text_fg)),
+        Span::styled(theme.name, Style::default().fg(theme.success_fg).add_modifier(Modifier::BOLD)),
+    ]));
+    left_lines.push(Line::from(""));
+
+    // Check Interval
+    {
+        let is_selected = app.settings_selected_index == 1;
+        let is_editing = app.input_mode == InputMode::Editing && app.settings_field_edit == Some(SettingsField::CheckInterval);
+        
+        let label = Span::styled("  Check Interval:     ", Style::default().fg(theme.text_fg));
+        let val = if is_editing {
+            Span::styled(format!("{}█", app.settings_input.value()), Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(format!("{} minutes", app.config.check_interval_minutes), Style::default().fg(theme.success_fg))
+        };
+        
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        left_lines.push(Line::from(vec![label, val]).style(row_style));
+    }
+    left_lines.push(Line::from(""));
+
+    // Max Cache Size
+    {
+        let is_selected = app.settings_selected_index == 2;
+        let is_editing = app.input_mode == InputMode::Editing && app.settings_field_edit == Some(SettingsField::MaxCacheSize);
+        
+        let label = Span::styled("  Max Cache Size:     ", Style::default().fg(theme.text_fg));
+        let val = if is_editing {
+            Span::styled(format!("{}█", app.settings_input.value()), Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(format!("{} MB", app.config.max_cache_size_mb), Style::default().fg(theme.success_fg))
+        };
+        
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        left_lines.push(Line::from(vec![label, val]).style(row_style));
+    }
+    left_lines.push(Line::from(""));
+
+    // AUR RPC URL
+    {
+        let is_selected = app.settings_selected_index == 3;
+        let is_editing = app.input_mode == InputMode::Editing && app.settings_field_edit == Some(SettingsField::AurUrl);
+        
+        let label = Span::styled("  AUR RPC URL:        ", Style::default().fg(theme.text_fg));
+        let val = if is_editing {
+            Span::styled(format!("{}█", app.settings_input.value()), Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(app.config.aur_rpc_url.clone(), Style::default().fg(theme.success_fg))
+        };
+        
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        left_lines.push(Line::from(vec![label, val]).style(row_style));
+    }
+    left_lines.push(Line::from(""));
+
+    // Auto Clean Cache
+    {
+        let is_selected = app.settings_selected_index == 4;
+        let label = Span::styled("  Auto Clean Cache:   ", Style::default().fg(theme.text_fg));
+        let val = Span::styled(
+            if app.config.auto_clean_cache { "On" } else { "Off" },
+            Style::default().fg(if app.config.auto_clean_cache { theme.success_fg } else { theme.warning_fg }).add_modifier(Modifier::BOLD)
+        );
+
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        left_lines.push(Line::from(vec![label, val]).style(row_style));
+    }
+    left_lines.push(Line::from(""));
+
+    // Auto Clean Interval
+    {
+        let is_selected = app.settings_selected_index == 5;
+        let is_editing = app.input_mode == InputMode::Editing && app.settings_field_edit == Some(SettingsField::AutoCleanInterval);
+
+        let label = Span::styled("  Clean Interval:     ", Style::default().fg(theme.text_fg));
+        let val = if is_editing {
+            Span::styled(format!("{}█", app.settings_input.value()), Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(format!("{} days", app.config.auto_clean_interval_days), Style::default().fg(theme.success_fg))
+        };
+
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        left_lines.push(Line::from(vec![label, val]).style(row_style));
+    }
+
+
+    // Help details
+    left_lines.push(Line::from(""));
+    left_lines.push(Line::from(""));
+    left_lines.push(Line::from(Span::styled("  💡 Keyboard Help:", Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))));
+    left_lines.push(Line::from(Span::styled("  • press ↑/↓ (k/j) to select settings", Style::default().fg(theme.text_fg))));
+    left_lines.push(Line::from(Span::styled("  • press ←/→ (h/l) to change active Theme", Style::default().fg(theme.text_fg))));
+    left_lines.push(Line::from(Span::styled("  • press Enter to edit selected value", Style::default().fg(theme.text_fg))));
+    left_lines.push(Line::from(Span::styled("  • press Esc to discard edits", Style::default().fg(theme.text_fg))));
+    left_lines.push(Line::from(Span::styled("  • press Enter again to save edits", Style::default().fg(theme.text_fg))));
+
+    let left_para = Paragraph::new(left_lines).block(left_block);
+    f.render_widget(left_para, chunks[0]);
+
+    // RIGHT PANE: Scanner Security Patterns
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_fg))
+        .title(Span::styled(" 🛡️ Scanner Security Patterns ", Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD)));
+
+    let mut right_lines = Vec::new();
+    right_lines.push(Line::from(""));
+    right_lines.push(Line::from(Span::styled("  These regex patterns are scanned in PKGBUILDs:", Style::default().fg(theme.text_fg).add_modifier(Modifier::DIM))));
+    right_lines.push(Line::from(""));
+
+    let num_patterns = app.config.risky_patterns.len();
+    for i in 0..num_patterns {
+        let pattern_idx = 6 + i;
+        let is_selected = app.settings_selected_index == pattern_idx;
+        let is_editing = app.input_mode == InputMode::Editing && app.settings_field_edit == Some(SettingsField::RiskyPattern(i));
+        
+        let prefix = format!("  {}. ", i + 1);
+        let prefix_span = Span::styled(prefix, Style::default().fg(theme.accent_fg));
+        
+        let pattern_span = if is_editing {
+            Span::styled(format!("{}█", app.settings_input.value()), Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(app.config.risky_patterns[i].clone(), Style::default().fg(theme.text_fg))
+        };
+
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        right_lines.push(Line::from(vec![prefix_span, pattern_span]).style(row_style));
+    }
+    
+    right_lines.push(Line::from(""));
+
+    // Add New Pattern option
+    {
+        let add_idx = 6 + num_patterns;
+        let is_selected = app.settings_selected_index == add_idx;
+        let is_editing = app.input_mode == InputMode::Editing && app.settings_field_edit == Some(SettingsField::AddRiskyPattern);
+        
+        let label = if is_editing {
+            Span::styled(format!("  [New Pattern: {}█]", app.settings_input.value()), Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled("  [Add New Pattern]", Style::default().fg(theme.success_fg).add_modifier(Modifier::BOLD))
+        };
+
+        let row_style = if is_selected {
+            Style::default().bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        right_lines.push(Line::from(label).style(row_style));
+    }
+
+
+    right_lines.push(Line::from(""));
+    right_lines.push(Line::from(Span::styled("  💡 Patterns Help:", Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD))));
+    right_lines.push(Line::from(Span::styled("  • select a pattern and press 'd' to delete", Style::default().fg(theme.text_fg))));
+    right_lines.push(Line::from(Span::styled("  • select a pattern and press Enter to edit inline", Style::default().fg(theme.text_fg))));
+
+    let right_para = Paragraph::new(right_lines).block(right_block);
+    f.render_widget(right_para, chunks[1]);
+}
+
+fn draw_systemd_viewer(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme();
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    // Left pane: Failed Services List
+    let list_border_style = Style::default().fg(theme.accent_fg);
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(list_border_style)
+        .title(Span::styled(" 🩺 Failed Services ", Style::default().fg(theme.error_fg).add_modifier(Modifier::BOLD)));
+
+    let items: Vec<ListItem> = if app.failed_services.is_empty() {
+        vec![ListItem::new(Line::from("  No failed services found."))]
+    } else {
+        app.failed_services
+            .iter()
+            .map(|s| {
+                ListItem::new(vec![
+                    Line::from(Span::styled(format!("  ● {}", s.unit), Style::default().fg(theme.error_fg).add_modifier(Modifier::BOLD))),
+                    Line::from(Span::styled(format!("    {}", s.description), Style::default().fg(theme.text_fg).add_modifier(Modifier::DIM))),
+                ])
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(list_block)
+        .highlight_style(Style::default().bg(theme.highlight_bg));
+
+    f.render_stateful_widget(list, chunks[0], &mut app.systemd_list_state);
+
+    // Right pane: Logs Preview
+    let logs_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_fg))
+        .title(Span::styled(" 📰 Logs Preview (journalctl) ", Style::default().fg(theme.accent_fg).add_modifier(Modifier::BOLD)));
+
+    let log_lines: Vec<Line<'_>> = if app.systemd_logs_loading {
+        vec![Line::from("  Loading logs...")]
+    } else if app.systemd_selected_logs.is_empty() {
+        vec![Line::from("  Select a service on the left to preview logs.")]
+    } else {
+        app.systemd_selected_logs
+            .iter()
+            .map(|l| {
+                let style = if l.contains("error") || l.contains("failed") || l.contains("ERROR") || l.contains("FAILED") {
+                    Style::default().fg(theme.error_fg)
+                } else if l.contains("warn") || l.contains("WARN") || l.contains("warning") {
+                    Style::default().fg(theme.warning_fg)
+                } else {
+                    Style::default().fg(theme.text_fg)
+                };
+                Line::from(Span::styled(l.clone(), style))
+            })
+            .collect()
+    };
+
+    let logs_para = Paragraph::new(log_lines)
+        .block(logs_block)
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(logs_para, chunks[1]);
+}
+

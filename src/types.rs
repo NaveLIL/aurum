@@ -25,6 +25,15 @@ pub struct DiskStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct FailedService {
+    pub unit: String,
+    pub load: String,
+    pub active: String,
+    pub sub: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct SystemInfo {
     pub last_upgrade_days: u32,
     pub pacman_lock_exists: bool,
@@ -33,6 +42,7 @@ pub struct SystemInfo {
     pub multiple_kernels_installed: bool,
     pub cachyos_kernel_installed: bool,
     pub is_online: bool,
+    pub failed_services_count: u32,
 }
 
 
@@ -96,11 +106,28 @@ pub struct NewsItem {
     pub pub_date: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CacheSource {
+    Aur,
+    Pacman,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CacheEntry {
     pub name: String,
     pub size_bytes: u64,
     pub last_modified: String,
+    pub source: CacheSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CpuMemStats {
+    pub cpu_usage: f64,
+    pub cpu_temp_c: Option<f64>,
+    pub mem_total_bytes: u64,
+    pub mem_used_bytes: u64,
+    pub swap_total_bytes: u64,
+    pub swap_used_bytes: u64,
 }
 
 pub const TEAM_SIG: &str = "EREZ Dev";

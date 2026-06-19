@@ -4,3 +4,7 @@ pub mod news;
 pub mod highlight;
 pub mod store;
 pub mod flatpak;
+pub mod system;
+pub mod systemd;
+
+

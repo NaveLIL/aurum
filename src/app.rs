@@ -1,5 +1,5 @@
 use tui_input::Input;
-use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry, DiskStats, SystemInfo};
+use crate::types::{Package, Update, ScanResult, NewsItem, CacheEntry, DiskStats, SystemInfo, CpuMemStats, FailedService};
 use crate::config::Config;
 use crate::action::Action;
 use std::collections::HashSet;
@@ -32,6 +32,27 @@ pub enum Route {
     Scanner,
     PackageDetails,
     DiffViewer,
+    Settings,
+    Systemd,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum SettingsField {
+    CheckInterval,
+    MaxCacheSize,
+    AurUrl,
+    AutoCleanCache,
+    AutoCleanInterval,
+    RiskyPattern(usize),
+    AddRiskyPattern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PkgbuildViewMode {
+    Full,
+    Diff,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +60,7 @@ pub enum InputMode {
     Normal,
     Editing,
 }
+
 
 pub struct App {
     pub running: bool,
@@ -58,8 +80,12 @@ pub struct App {
     pub cache_entries: Vec<CacheEntry>,
     pub orphans: Vec<Package>,
     pub selected_packages: std::collections::HashSet<String>,
-    pub pkgbuild_lines: Vec<ratatui::text::Line<'static>>,
+    pub pkgbuild_name: String,
+    pub pkgbuild_view_mode: PkgbuildViewMode,
+    pub pkgbuild_raw_lines: Vec<ratatui::text::Line<'static>>,
+    pub pkgbuild_diff_lines: Vec<ratatui::text::Line<'static>>,
     pub pkgbuild_scroll: usize,
+
 
     // Flatpak
     pub flatpak_available: bool,
@@ -92,9 +118,21 @@ pub struct App {
     pub show_help: bool,
     pub disk_stats: DiskStats,
     pub system_info: SystemInfo,
+    pub cpu_mem_stats: CpuMemStats,
+    // Settings State
+    pub settings_selected_index: usize,
+    pub settings_field_edit: Option<SettingsField>,
+    pub settings_input: Input,
+
+    // Systemd Inspector State
+    pub failed_services: Vec<FailedService>,
+    pub systemd_list_state: ratatui::widgets::ListState,
+    pub systemd_selected_logs: Vec<String>,
+    pub systemd_logs_loading: bool,
 }
 
-const TAB_COUNT: usize = 8;
+
+const TAB_COUNT: usize = 9;
 
 impl App {
     pub fn new(config: Config) -> Self {
@@ -114,8 +152,12 @@ impl App {
             cache_entries: Vec::new(),
             orphans: Vec::new(),
             selected_packages: std::collections::HashSet::new(),
-            pkgbuild_lines: Vec::new(),
+            pkgbuild_name: String::new(),
+            pkgbuild_view_mode: PkgbuildViewMode::Diff,
+            pkgbuild_raw_lines: Vec::new(),
+            pkgbuild_diff_lines: Vec::new(),
             pkgbuild_scroll: 0,
+
             flatpak_available: false,
             search_source: SearchSource::default(),
             installed_source: InstalledSource::default(),
@@ -136,6 +178,14 @@ impl App {
             show_help: false,
             disk_stats: DiskStats::default(),
             system_info: SystemInfo::default(),
+            cpu_mem_stats: CpuMemStats::default(),
+            settings_selected_index: 0,
+            settings_field_edit: None,
+            settings_input: Input::default(),
+            failed_services: Vec::new(),
+            systemd_list_state: ratatui::widgets::ListState::default(),
+            systemd_selected_logs: Vec::new(),
+            systemd_logs_loading: false,
         }
     }
 
@@ -153,8 +203,13 @@ impl App {
             5 => Route::News,
             6 => Route::Cache,
             7 => Route::Scanner,
+            8 => Route::Settings,
             _ => Route::Dashboard,
         }
+    }
+
+    pub fn theme(&self) -> crate::theme::ThemeColors {
+        crate::theme::get_theme(&self.config.theme)
     }
 
     pub fn next_tab(&mut self) {
