@@ -919,6 +919,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.disk_stats = stats;
                 }
                 Action::SetCpuMemStats(stats) => {
+                    app.cpu_history.push(stats.cpu_usage as u64);
+                    if app.cpu_history.len() > 100 {
+                        app.cpu_history.remove(0);
+                    }
+
+                    let mem_ratio = if stats.mem_total_bytes > 0 {
+                        stats.mem_used_bytes as f64 / stats.mem_total_bytes as f64
+                    } else {
+                        0.0
+                    };
+                    app.mem_history.push((mem_ratio * 100.0) as u64);
+                    if app.mem_history.len() > 100 {
+                        app.mem_history.remove(0);
+                    }
+
                     app.cpu_mem_stats = stats;
                 }
                 Action::SetSystemInfo(info) => {

@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Line},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap, ListState, LineGauge},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap, ListState, LineGauge, Sparkline},
     Frame,
 };
 use crate::app::{App, Route, InputMode, InstalledSource, SearchSource, SettingsField};
@@ -58,12 +58,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
-    let tab_names = ["Dashboard", "Updates", "Installed", "Search", "Store", "News", "Cache", "Scanner", "Settings"];
+    let tab_names = [
+        ("📊", "Dashboard"),
+        ("🔄", "Updates"),
+        ("📦", "Installed"),
+        ("🔍", "Search"),
+        ("🏪", "Store"),
+        ("📰", "News"),
+        ("🧹", "Cache"),
+        ("🛡️", "Scanner"),
+        ("⚙️", "Settings"),
+    ];
     let titles: Vec<Line> = tab_names
         .iter()
-        .map(|t| {
-            let (first, rest) = t.split_at(1);
+        .map(|(icon, name)| {
+            let (first, rest) = name.split_at(1);
             Line::from(vec![
+                Span::raw(format!("{} ", icon)),
                 Span::styled(first, Style::default().fg(tc(app, Color::Rgb(255, 200, 50)))),
                 Span::styled(rest, Style::default().fg(tc(app, Color::Rgb(100, 220, 100)))),
             ])
@@ -195,7 +206,7 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(11), // System Health & Upgrade Alert
-            Constraint::Length(9),  // System Resources (CPU/Memory gauges)
+            Constraint::Length(11), // System Resources (CPU/Memory gauges + Sparklines)
             Constraint::Min(0),     // Keyboard Help
         ])
         .split(chunks[1]);
@@ -304,11 +315,14 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     let resource_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // CPU Row
+            Constraint::Length(1), // CPU Gauge
+            Constraint::Length(1), // CPU Sparkline
             Constraint::Length(1), // Spacing
-            Constraint::Length(1), // RAM Row
+            Constraint::Length(1), // RAM Gauge
+            Constraint::Length(1), // RAM Sparkline
             Constraint::Length(1), // Spacing
-            Constraint::Length(1), // Swap Row
+            Constraint::Length(1), // Swap Gauge
+            Constraint::Min(0),
         ])
         .split(inner_area);
 
@@ -343,6 +357,21 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(cpu_label, row_chunks[0]);
         f.render_widget(cpu_gauge, row_chunks[1]);
         f.render_widget(cpu_stats_para, row_chunks[2]);
+
+        // CPU Sparkline
+        let spark_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Min(5),
+                Constraint::Length(22),
+            ])
+            .split(resource_layout[1]);
+        let cpu_spark_data: Vec<u64> = app.cpu_history.iter().copied().collect();
+        let cpu_spark = Sparkline::default()
+            .data(&cpu_spark_data)
+            .style(Style::default().fg(theme.accent_fg));
+        f.render_widget(cpu_spark, spark_chunks[1]);
     }
 
     // Render RAM
@@ -354,7 +383,7 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Min(5),      // Gauge
                 Constraint::Length(22),  // "14.9% (4.6G/31.0G)"
             ])
-            .split(resource_layout[2]);
+            .split(resource_layout[3]);
 
         let ram_label = Paragraph::new(Span::styled(" RAM  ", Style::default().fg(theme.text_fg).add_modifier(Modifier::BOLD)));
 
@@ -381,6 +410,21 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(ram_label, row_chunks[0]);
         f.render_widget(ram_gauge, row_chunks[1]);
         f.render_widget(ram_stats_para, row_chunks[2]);
+
+        // RAM Sparkline
+        let spark_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Min(5),
+                Constraint::Length(22),
+            ])
+            .split(resource_layout[4]);
+        let ram_spark_data: Vec<u64> = app.mem_history.iter().copied().collect();
+        let ram_spark = Sparkline::default()
+            .data(&ram_spark_data)
+            .style(Style::default().fg(theme.success_fg));
+        f.render_widget(ram_spark, spark_chunks[1]);
     }
 
     // Render SWAP
@@ -392,7 +436,7 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
                 Constraint::Min(5),      // Gauge
                 Constraint::Length(22),  // " 5.8% (1.8G/31.0G)"
             ])
-            .split(resource_layout[4]);
+            .split(resource_layout[6]);
 
         let swap_label = Paragraph::new(Span::styled(" SWAP ", Style::default().fg(theme.text_fg).add_modifier(Modifier::BOLD)));
 

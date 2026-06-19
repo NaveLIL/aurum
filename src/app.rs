@@ -119,6 +119,8 @@ pub struct App {
     pub disk_stats: DiskStats,
     pub system_info: SystemInfo,
     pub cpu_mem_stats: CpuMemStats,
+    pub cpu_history: Vec<u64>,
+    pub mem_history: Vec<u64>,
     // Settings State
     pub settings_selected_index: usize,
     pub settings_field_edit: Option<SettingsField>,
@@ -179,6 +181,8 @@ impl App {
             disk_stats: DiskStats::default(),
             system_info: SystemInfo::default(),
             cpu_mem_stats: CpuMemStats::default(),
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             settings_selected_index: 0,
             settings_field_edit: None,
             settings_input: Input::default(),
